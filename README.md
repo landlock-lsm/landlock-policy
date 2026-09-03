@@ -103,7 +103,15 @@ stacked Landlock rulesets   = enforce every independent authority's restrictions
 ### JSON specification
 
 The JSON format is used to define a Landlock security policy as specified by the
-related [JSON schema](schema/landlock-policy.json).
+related [JSON schema](schema/landlock-policy.json). Schema validity checks the
+structural contract but is not sufficient for parser acceptance. After ABI
+clamping and group resolution, the parser rejects a policy whose filesystem,
+network, and scope masks are all empty. The schema cannot express that aggregate
+check. For an ABI already recognized by the parser, resolution uses that fixed
+ABI. When a requested ABI is newer than the parser recognizes, however, a newer
+library can raise the clamped format ceiling and change the resolved masks and
+emptiness result. Validate deployable policies with the parser as well as the
+schema.
 
 As the Landlock kernel maintainers, we can guarantee that the specification and
 the library will be kept in sync with kernel changes.
@@ -116,24 +124,26 @@ service managers, container runtimes) might be newer or older than the running
 kernel.
 
 In the case of an older kernel and a newer user space, an up-to-date Landlock
-policy should be still compatible as much as possible with older kernels.
-The default behavior should then be to following a best-effort approach to
-protect users as much as possible.  See the "compatibility" modes in [the
-specification](schema/landlock-policy.json).
+policy should remain as compatible as possible with older kernels. The default
+behavior therefore follows a best-effort approach that protects users with the
+supported functionality. See the [specification](schema/landlock-policy.json).
 
-Every policy must declare a positive Landlock ABI version. Declaring the ABI
-makes the policy's tested compatibility contract explicit and keeps its meaning
-stable across library upgrades. It is not inferred from the library version or
-the running kernel; runtime compatibility is applied separately after the
-policy is interpreted.
+Every policy must declare a Landlock ABI version from 1 through 2^31 - 1, the
+positive `i32` range. Declaring the ABI makes the policy's tested compatibility
+contract explicit and keeps ABI-relative resolution stable within this format.
+It does not preserve old-format semantics across a policy-format migration; see
+[Policy format migration](#policy-format-migration). The ABI is not inferred
+from the library version or the running kernel.
 
-If a requested ABI is newer than the policy format supports, the parser uses
-the format's latest supported ABI to interpret the policy. This implementation
-recognizes through ABI v7. ABI v7 adds restrict-self flags outside the policy
-grammar, so its represented access-right and scope masks remain unchanged from
-ABI v6. This preserves the known subset of a future policy, but it does not make
-unknown access names, properties, or rule types valid; unknown syntax remains an
-error.
+If an in-range requested ABI is newer than the policy format supports, the
+parser uses the format's latest supported ABI to interpret the policy. This
+implementation recognizes through ABI v7. ABI v7 adds restrict-self flags
+outside the policy grammar, so its represented access-right and scope masks
+remain unchanged from ABI v6. The resulting ruleset then follows rust-landlock's
+compatibility handling for the running kernel, which may further reduce the
+rights handled and enforced. This preserves the known subset of a future policy,
+but it does not make unknown access names, properties, or rule types valid;
+unknown syntax remains an error.
 
 Parser-known access and scope names remain valid at every policy ABI. The ABI
 defines the effective mask universe, so a known value outside that universe is
@@ -163,12 +173,16 @@ The policy format should ease conciseness (e.g., by handling arrays of paths).
 The policy format should handle groups of access rights per [Landlock ABI
 version](https://landlock.io/rust-landlock/landlock/enum.ABI.html).
 
-### Flexible policies
+### Secure defaults
 
-The parser automatically completes known properties with secure defaults.
-Filesystem and network handling, and process scoping, each start with every
-right supported by the effective policy ABI. The optional inverse fields remove
-rights from those complete masks:
+Most policies should declare their tested ABI, add narrow path or port
+allowances, and omit `ruleset` entirely. The parser starts filesystem and
+network handling, and process scoping, with every right supported by the
+effective policy ABI. A policy containing only an ABI is therefore valid and
+selects these complete masks without adding resource allowances.
+
+The optional inverse fields are advanced compatibility controls, not ordinary
+permissions:
 
 - `unhandledAccessFs` (`unhandled_access_fs` in TOML) removes rights from the
   Landlock `handled_access_fs` mask;
@@ -178,10 +192,17 @@ rights from those complete masks:
 
 Omitting a field, setting an optional JSON property to `null`, or using an empty
 array removes nothing. Omission is the canonical, shortest, and strongest
-representation. Repeated ruleset entries are source fragments: their
-exclusions are unioned before resolving one UAPI mask, not installed as
-independent Landlock layers. Path and port rules remain positive allowances and
-never add rights back to handled masks.
+representation. Removing a right or scope usually stops this Landlock layer
+from restricting it globally. The `refer` right is exceptional: leaving it
+unhandled while another filesystem right is handled makes Landlock deny
+cross-directory reparenting with `EXDEV`. No exclusion overrides restrictions
+from another Landlock layer or security mechanism.
+
+Repeated ruleset entries are source fragments: their exclusions are unioned
+before resolving one UAPI mask, not installed as independent Landlock layers.
+Path and port rules remain positive allowances and never add rights back to
+handled masks. Because inverse arrays reduce handled or scoped rights, use them
+only for tested compatibility requirements.
 
 A directly parsed policy whose final three masks are empty is rejected.
 Composition remains infallible and intersects concrete masks, so it may produce
@@ -189,10 +210,12 @@ an empty policy; building that composition then fails because there is no
 handled access. Independent security authorities should instead install
 separate stacked Landlock layers.
 
-### Deliberate exclusions
+### Compatibility exclusions (advanced)
 
-Use an inverse field only for a reviewed compatibility requirement. For
-example, this complete policy handles every ABI 5 right except device-control
+First try a targeted path or port allowance when an application needs access.
+Use an inverse field only when complete handling remains incompatible and the
+policy owner has reviewed the resulting global loss of enforcement. For
+example, this exceptional policy handles every ABI 5 right except device-control
 operations while granting read/write access below `/tmp`:
 
 ```json
@@ -238,11 +261,13 @@ filesystem right is handled unless a matching `refer` rule permits it. To avoid
 `EXDEV`, prefer targeted `refer` allowances; where that is unsuitable, use the
 application's documented copy/write/remove fallback.
 
-Prefer, in order: the complete ABI mask, targeted path or port allowances, one
-concrete global exclusion, a deliberate semantic-group exclusion, and finally
-`abi.all` only when permanently disabling a category. Changing a policy ABI,
-exclusion, variable, or allowance changes its compatibility contract and
-requires retesting by the component owner.
+If an exclusion is necessary, prefer one concrete right over a semantic group.
+A group is a future-expanding compatibility contract, and `abi.all` should be a
+last resort used only to permanently disable a category. Because process scopes
+have no path or port allowance rules, every `unscoped` item is likewise a global
+compatibility decision. Changing a policy ABI, exclusion, variable, or allowance
+changes its compatibility contract and requires retesting by the component
+owner.
 
 ## Reference implementation
 
@@ -329,13 +354,13 @@ before combining policies from different maintainers.
 
 ## TOML policy example
 
-Here is an example of a [TOML policy](examples/micro-var.toml) that uses
-variables, access right groups, and list of directory hierarchies for
-conciseness.
+Here is an abridged [TOML policy](examples/micro-var.toml) that uses variables,
+access right groups, and a list of directory hierarchies for conciseness.
 
 ```toml
-abi = 6
+abi = 5
 
+# The omitted ruleset defaults to all rights supported by ABI 5.
 [[variable]]
 name = "tmp"
 literal = ["/tmp", "/var/tmp"]
@@ -388,6 +413,15 @@ repository, they are replaced without compatibility aliases:
   `landlock-policy`, and `landlock-exec`.
 
 ## Policy format migration
+
+> **Security migration warning:** Successful parsing does not show that an old
+> policy retained its meaning. An old policy can already declare an ABI, contain
+> none of the removed positive handled or scoped fields, and still become much
+> stricter. Previously, a narrow path or port rule implicitly handled only its
+> listed rights; this format derives complete ABI masks, so the same source can
+> deny all other filesystem, network, and scoped operations that lack an
+> allowance. Semantically convert and retest every old policy rather than
+> treating parser acceptance as migration evidence.
 
 Policies accepted by earlier versions may require these updates:
 
