@@ -241,17 +241,18 @@ impl Policy {
     /// best-effort way, which means the common handled access rights with all
     /// rules.
     ///
-    /// When composing policies with different ABI versions (e.g., one
-    /// against ABI::V1 and another against ABI::V2), the composition will
-    /// downgrade to the intersection of handled access rights, ensuring the
-    /// resulting policy remains functional across both contexts.
+    /// When both policies declare different ABI versions (e.g., one against
+    /// ABI::V1 and another against ABI::V2), the composition retains the lower
+    /// version. Handled access rights are independently intersected.
     ///
     /// # Behavior
     ///
     /// - Handled access rights are combined using bitwise AND (intersection).
+    /// - Scoped rights are combined using bitwise AND (intersection).
     /// - Rules are merged with access rights limited to commonly handled ones.
-    /// - Paths with empty access rights after intersection are removed.
+    /// - Paths and ports with empty access rights after intersection are removed.
     /// - Variables from both policies are merged.
+    /// - If both policies declare ABI versions, the lower version is retained.
     ///
     /// # Commutativity
     ///
