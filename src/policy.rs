@@ -24,12 +24,10 @@ pub enum BuildRulesetError {
     Ruleset(#[from] RulesetError),
 }
 
-#[cfg_attr(test, derive(Default))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
-    /// This ABI is the configured local variable, which might be different than
-    /// the ABI required to support all listed access rights.
-    pub(crate) abi: Option<ABI>,
+    /// Effective ABI used to interpret every listed access right.
+    pub(crate) abi: ABI,
     pub(crate) variables: Variables,
     pub(crate) handled_fs: BitFlags<AccessFs>,
     pub(crate) handled_net: BitFlags<AccessNet>,
@@ -64,10 +62,8 @@ impl TryFrom<NonEmptyStruct<JsonPolicy>> for Policy {
     type Error = PolicyError;
 
     fn try_from(json: NonEmptyStruct<JsonPolicy>) -> Result<Self, Self::Error> {
-        let mut policy = Self::empty();
         let json = json.into_inner();
-
-        policy.abi = json.abi.map(Into::into);
+        let mut policy = Self::empty(json.abi.into());
 
         for variable in json.variable.unwrap_or_default() {
             let name = variable.name.parse()?;
@@ -81,22 +77,19 @@ impl TryFrom<NonEmptyStruct<JsonPolicy>> for Policy {
             policy.handled_fs |= ruleset
                 .handledAccessFs
                 .map(|access| access.resolve_bitflags(policy.abi))
-                .transpose()?
                 .unwrap_or_default();
             policy.handled_net |= ruleset
                 .handledAccessNet
                 .map(|access| access.resolve_bitflags(policy.abi))
-                .transpose()?
                 .unwrap_or_default();
             policy.scoped |= ruleset
                 .scoped
                 .map(|scoped| scoped.resolve_bitflags(policy.abi))
-                .transpose()?
                 .unwrap_or_default();
         }
 
         for path_beneath in json.pathBeneath.unwrap_or_default() {
-            let access = path_beneath.allowedAccess.resolve_bitflags(policy.abi)?;
+            let access = path_beneath.allowedAccess.resolve_bitflags(policy.abi);
 
             // It is possible to have rules with empty access because of empty
             // access group resolution.
@@ -115,7 +108,7 @@ impl TryFrom<NonEmptyStruct<JsonPolicy>> for Policy {
         }
 
         for net_port in json.netPort.unwrap_or_default() {
-            let access = net_port.allowedAccess.resolve_bitflags(policy.abi)?;
+            let access = net_port.allowedAccess.resolve_bitflags(policy.abi);
 
             // It is possible to have rules with empty access because of empty
             // access group resolution.
@@ -222,12 +215,11 @@ impl PolicyFormat {
 }
 
 impl Policy {
-    // Do not implement Default for Policy because it would not be useful but
-    // misleading.  Indeed, the default policy would allow everything and
-    // could not be updated with public methods (e.g. compose).
-    fn empty() -> Self {
+    // Policy cannot implement Default because every policy requires an
+    // explicit ABI.
+    pub(crate) fn empty(abi: ABI) -> Self {
         Self {
-            abi: Default::default(),
+            abi,
             variables: Default::default(),
             handled_fs: Default::default(),
             handled_net: Default::default(),
@@ -307,12 +299,7 @@ impl Policy {
         self.scoped &= other.scoped;
 
         // Fifth step: downgrade the ABI version.
-        self.abi = match (self.abi, other.abi) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
+        self.abi = self.abi.min(other.abi);
     }
 
     pub fn parse_json<R>(reader: R) -> Result<Self, ParseJsonError>
@@ -415,13 +402,12 @@ impl Policy {
 }
 
 #[test]
-fn test_policy_default_empty() {
-    let policy = Policy::default();
+fn test_policy_empty() {
+    let policy = Policy::empty(ABI::V6);
+    assert_eq!(policy.abi, ABI::V6);
     assert_eq!(policy.handled_fs, BitFlags::EMPTY);
     assert_eq!(policy.handled_net, BitFlags::EMPTY);
     assert_eq!(policy.scoped, BitFlags::EMPTY);
-
-    assert_eq!(policy, Policy::empty());
 }
 
 pub trait OptionalPolicy {
@@ -513,7 +499,7 @@ mod tests_compose {
     fn test_empty_ruleset() {
         let mut c1 = Policy {
             handled_fs: AccessFs::Execute.into(),
-            ..Default::default()
+            ..Policy::empty(ABI::V1)
         };
         let c2 = c1.clone();
         c1.compose(&c2);
@@ -524,15 +510,13 @@ mod tests_compose {
     fn test_different_ruleset() {
         let mut c1 = Policy {
             handled_fs: AccessFs::Execute.into(),
-            ..Default::default()
+            ..Policy::empty(ABI::V4)
         };
         let c2 = Policy {
             handled_net: AccessNet::BindTcp.into(),
-            ..Default::default()
+            ..Policy::empty(ABI::V4)
         };
-        let expect = Policy {
-            ..Default::default()
-        };
+        let expect = Policy::empty(ABI::V4);
         c1.compose(&c2);
         assert_eq!(c1, expect);
     }
@@ -547,7 +531,7 @@ mod tests_compose {
                 (TemplateString::from_text("/c1"), c1_access),
             ]
             .into(),
-            ..Default::default()
+            ..Policy::empty(ABI::V1)
         };
 
         assert!(c1_access.contains(AccessFs::WriteFile));
@@ -559,7 +543,7 @@ mod tests_compose {
                 (TemplateString::from_text("/c2"), c2_access),
             ]
             .into(),
-            ..Default::default()
+            ..Policy::empty(ABI::V2)
         };
 
         c1.compose(&c2);
@@ -573,65 +557,19 @@ mod tests_compose {
                     (TemplateString::from_text("/c2"), c1_access & c2_access),
                 ]
                 .into(),
-                ..Default::default()
+                ..Policy::empty(ABI::V1)
             }
         );
     }
 
     #[test]
-    fn test_abi_none_none() {
-        let c1 = Policy {
-            abi: None,
-            ..Default::default()
-        };
+    fn test_abi_minimum() {
+        let c1 = Policy::empty(ABI::V1);
         let mut c1_mut = c1.clone();
-        let mut c2_mut = Policy {
-            abi: None,
-            ..Default::default()
-        };
+        let mut c2_mut = Policy::empty(ABI::V2);
 
         c1_mut.compose(&c2_mut);
-        assert_eq!(c1_mut.abi, None);
-
-        // Test commutativity
-        c2_mut.compose(&c1);
-        assert_eq!(c1_mut, c2_mut);
-    }
-
-    #[test]
-    fn test_abi_some_none() {
-        let c1 = Policy {
-            abi: Some(ABI::V2),
-            ..Default::default()
-        };
-        let mut c1_mut = c1.clone();
-        let mut c2_mut = Policy {
-            abi: None,
-            ..Default::default()
-        };
-
-        c1_mut.compose(&c2_mut);
-        assert_eq!(c1_mut.abi, Some(ABI::V2));
-
-        // Test commutativity
-        c2_mut.compose(&c1);
-        assert_eq!(c1_mut, c2_mut);
-    }
-
-    #[test]
-    fn test_abi_some_some() {
-        let c1 = Policy {
-            abi: Some(ABI::V1),
-            ..Default::default()
-        };
-        let mut c1_mut = c1.clone();
-        let mut c2_mut = Policy {
-            abi: Some(ABI::V2),
-            ..Default::default()
-        };
-
-        c1_mut.compose(&c2_mut);
-        assert_eq!(c1_mut.abi, Some(ABI::V1));
+        assert_eq!(c1_mut.abi, ABI::V1);
 
         // Test commutativity
         c2_mut.compose(&c1);

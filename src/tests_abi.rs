@@ -1,12 +1,92 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::{
-    parser::TemplateString,
-    tests_helpers::{parse_json, parse_json_schema, parse_toml, LATEST_ABI},
+    parser::{TemplateString, LATEST_ABI},
+    tests_helpers::{parse_json, parse_json_schema, parse_toml},
     Policy,
 };
-use landlock::{Access, AccessFs, AccessNet, Scope, ABI};
+use landlock::{Access, AccessFs, AccessNet, BitFlags, Scope, ABI};
 use serde_json::error::Category;
+
+#[test]
+fn test_represented_masks_by_abi() {
+    let fs_v1 = AccessFs::Execute
+        | AccessFs::WriteFile
+        | AccessFs::ReadFile
+        | AccessFs::ReadDir
+        | AccessFs::RemoveDir
+        | AccessFs::RemoveFile
+        | AccessFs::MakeChar
+        | AccessFs::MakeDir
+        | AccessFs::MakeReg
+        | AccessFs::MakeSock
+        | AccessFs::MakeFifo
+        | AccessFs::MakeBlock
+        | AccessFs::MakeSym;
+    let fs_v2 = fs_v1 | AccessFs::Refer;
+    let fs_v3 = fs_v2 | AccessFs::Truncate;
+    let fs_v5 = fs_v3 | AccessFs::IoctlDev;
+    let net_v4 = AccessNet::BindTcp | AccessNet::ConnectTcp;
+    let scope_v6 = Scope::AbstractUnixSocket | Scope::Signal;
+    let no_net: BitFlags<AccessNet> = BitFlags::EMPTY;
+    let no_scope: BitFlags<Scope> = BitFlags::EMPTY;
+
+    for (abi, fs, net, scope) in [
+        (ABI::V1, fs_v1, no_net, no_scope),
+        (ABI::V2, fs_v2, no_net, no_scope),
+        (ABI::V3, fs_v3, no_net, no_scope),
+        (ABI::V4, fs_v3, net_v4, no_scope),
+        (ABI::V5, fs_v5, net_v4, no_scope),
+        (ABI::V6, fs_v5, net_v4, scope_v6),
+    ] {
+        assert_eq!(AccessFs::from_all(abi), fs);
+        assert_eq!(AccessNet::from_all(abi), net);
+        assert_eq!(Scope::from_all(abi), scope);
+    }
+}
+
+#[test]
+fn test_latest_policy_abi() {
+    assert_eq!(LATEST_ABI, ABI::V6);
+    // A newer ABI may leave these represented category masks unchanged. When
+    // increasing LATEST_ABI, keep the baseline at the most recent ABI that
+    // changed one of them.
+    assert_eq!(AccessFs::from_all(ABI::V6), AccessFs::from_all(LATEST_ABI));
+    assert_eq!(
+        AccessNet::from_all(ABI::V6),
+        AccessNet::from_all(LATEST_ABI)
+    );
+    assert_eq!(Scope::from_all(ABI::V6), Scope::from_all(LATEST_ABI));
+}
+
+#[test]
+fn test_latest_plus_one() {
+    let requested = LATEST_ABI as i32 + 1;
+    let json = format!(
+        r#"{{
+            "abi": {requested},
+            "ruleset": [
+                {{
+                    "handledAccessFs": ["abi.all"]
+                }}
+            ]
+        }}"#
+    );
+    let toml = format!(
+        r#"
+        abi = {requested}
+        [[ruleset]]
+        handled_access_fs = ["abi.all"]
+        "#
+    );
+    let config = Policy {
+        handled_fs: AccessFs::from_all(LATEST_ABI),
+        ..Policy::empty(LATEST_ABI)
+    };
+
+    assert_eq!(parse_json(&json).unwrap(), config);
+    assert_eq!(parse_toml(&toml).unwrap(), config);
+}
 
 #[test]
 fn test_access_fs_with_value() {
@@ -29,16 +109,15 @@ fn test_access_fs_with_value() {
     "#;
 
     let policy = Policy {
-        abi: Some(ABI::V2),
         handled_fs: AccessFs::from_all(ABI::V2),
-        ..Default::default()
+        ..Policy::empty(ABI::V2)
     };
     assert_eq!(parse_json(json).unwrap(), policy);
     assert_eq!(parse_toml(toml).unwrap(), policy);
 }
 
 #[test]
-fn test_access_fs_without_value() {
+fn test_missing() {
     let json = r#"{
         "ruleset": [
             {
@@ -55,7 +134,7 @@ fn test_access_fs_without_value() {
         ]
     "#;
 
-    assert_eq!(parse_json_schema(json, false), Err(Category::Data));
+    assert_eq!(parse_json(json), Err(Category::Data));
     assert!(parse_toml(toml).is_err());
 }
 
@@ -66,6 +145,26 @@ fn test_format_error() {
     }"#;
     let toml = r#"
         abi = 1
+    "#;
+
+    assert_eq!(parse_json(json), Err(Category::Data));
+    assert!(parse_toml(toml).is_err());
+}
+
+#[test]
+fn test_non_integer() {
+    let json = r#"{
+        "abi": "6",
+        "ruleset": [
+            {
+                "handledAccessFs": ["execute"]
+            }
+        ]
+    }"#;
+    let toml = r#"
+        abi = "6"
+        [[ruleset]]
+        handled_access_fs = ["execute"]
     "#;
 
     assert_eq!(parse_json(json), Err(Category::Data));
@@ -91,9 +190,8 @@ fn test_format_ok() {
     "#;
 
     let policy = Policy {
-        abi: Some(ABI::V1),
         handled_fs: AccessFs::Execute.into(),
-        ..Default::default()
+        ..Policy::empty(ABI::V1)
     };
     assert_eq!(parse_json(json).unwrap(), policy);
     assert_eq!(parse_toml(toml).unwrap(), policy);
@@ -173,12 +271,11 @@ fn test_all_versions_abi_all() {
 
         let abi = version.into();
         let mut policy = Policy {
-            abi: Some(abi),
             handled_fs: AccessFs::from_all(abi),
             handled_net: AccessNet::from_all(abi),
             scoped: Scope::from_all(abi),
             rules_path_beneath: [(TemplateString::from_text("."), AccessFs::from_all(abi))].into(),
-            ..Default::default()
+            ..Policy::empty(abi)
         };
         if abi >= ABI::V4 {
             // Do not add rules with empty access right.
@@ -227,10 +324,9 @@ fn test_all_versions_abi_read_execute() {
             AccessFs::from_read(abi) | (AccessFs::from_all(abi) & AccessFs::Refer);
 
         let policy = Policy {
-            abi: Some(abi),
             handled_fs: expected_access,
             rules_path_beneath: [(TemplateString::from_text("."), expected_access)].into(),
-            ..Default::default()
+            ..Policy::empty(abi)
         };
         println!("Testing ABI {version} read_execute and expecting {policy:?}");
         assert_eq!(parse_json(&json).unwrap(), policy);
@@ -274,10 +370,9 @@ fn test_all_versions_abi_read_write() {
         let expected_access = AccessFs::from_all(abi) & !AccessFs::Execute;
 
         let policy = Policy {
-            abi: Some(abi),
             handled_fs: expected_access,
             rules_path_beneath: [(TemplateString::from_text("."), expected_access)].into(),
-            ..Default::default()
+            ..Policy::empty(abi)
         };
         println!("Testing ABI {version} read_write and expecting {policy:?}");
         assert_eq!(parse_json(&json).unwrap(), policy);
@@ -347,19 +442,61 @@ fn test_i32() {
             "abi.all",
         ]
     "#;
-
-    let abi = ABI::from(2147483647);
-    // To not require perfect syncing between this crate and the Landlock crate,
-    // only check that the returned ABI is greater than or equal to the
-    // currently greatest ABI.
-    assert!(abi >= LATEST_ABI);
     let policy = Policy {
-        abi: Some(abi),
-        handled_fs: AccessFs::from_all(abi),
-        ..Default::default()
+        handled_fs: AccessFs::from_all(LATEST_ABI),
+        ..Policy::empty(LATEST_ABI)
     };
     assert_eq!(parse_json(json).unwrap(), policy);
     assert_eq!(parse_toml(toml).unwrap(), policy);
+}
+
+#[test]
+fn test_future_abi_unknown_syntax() {
+    let json = [
+        r#"{
+            "abi": 2147483647,
+            "ruleset": [
+                {
+                    "handledAccessFs": ["future_right"]
+                }
+            ]
+        }"#,
+        r#"{
+            "abi": 2147483647,
+            "ruleset": [
+                {
+                    "futureAccess": ["execute"]
+                }
+            ]
+        }"#,
+        r#"{
+            "abi": 2147483647,
+            "futureRule": []
+        }"#,
+    ];
+    let toml = [
+        r#"
+            abi = 2147483647
+            [[ruleset]]
+            handled_access_fs = ["future_right"]
+        "#,
+        r#"
+            abi = 2147483647
+            [[ruleset]]
+            future_access = ["execute"]
+        "#,
+        r#"
+            abi = 2147483647
+            [[future_rule]]
+        "#,
+    ];
+
+    for json in json {
+        assert_eq!(parse_json(json), Err(Category::Data));
+    }
+    for toml in toml {
+        assert!(parse_toml(toml).is_err());
+    }
 }
 
 #[test]
