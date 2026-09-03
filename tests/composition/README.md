@@ -29,9 +29,6 @@ abi = 4
 name = "rw"
 literal = ["/home/user/tmp"]
 
-[[ruleset]]
-handled_access_fs = ["abi.all"]
-
 # Custom apps.
 [[path_beneath]]
 allowed_access = ["abi.read_execute"]

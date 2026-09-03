@@ -226,7 +226,7 @@ jobs:
     - name: Run landlock-exec with TOML (micro)
       run: rustup run stable cargo run --locked --package landlock-exec -- --toml examples/micro-write-tmp.toml true
 
-    - name: Run landlock-exec with FS-only restrictions
+    - name: Run landlock-exec with an example policy
       run: rustup run stable cargo run --locked --package landlock-exec -- --json examples/verbose-write-tmp.json true
 
     - name: Run landlock-exec with scope restrictions

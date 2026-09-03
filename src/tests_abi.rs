@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::{
-    parser::{TemplateString, LATEST_ABI},
+    parser::LATEST_ABI,
     policy::RulesetMasks,
     tests_helpers::{parse_json, parse_json_schema, parse_toml},
     Policy,
@@ -66,31 +66,17 @@ fn test_latest_plus_one() {
     let requested = LATEST_ABI as i32 + 1;
     let json = format!(
         r#"{{
-            "abi": {requested},
-            "ruleset": [
-                {{
-                    "handledAccessFs": ["abi.all"]
-                }}
-            ]
+            "abi": {requested}
         }}"#
     );
     let toml = format!(
         r#"
         abi = {requested}
-        [[ruleset]]
-        handled_access_fs = ["abi.all"]
         "#
     );
-    let config = Policy {
-        masks: RulesetMasks {
-            fs: AccessFs::from_all(LATEST_ABI),
-            ..Default::default()
-        },
-        ..Policy::empty(LATEST_ABI)
-    };
 
-    assert_eq!(parse_json(&json).unwrap(), config);
-    assert_eq!(parse_toml(&toml).unwrap(), config);
+    assert_eq!(parse_json(&json).unwrap(), Policy::new(LATEST_ABI));
+    assert_eq!(parse_toml(&toml).unwrap(), Policy::new(LATEST_ABI));
 }
 
 #[test]
@@ -99,8 +85,8 @@ fn test_access_fs_with_value() {
         "abi": 2,
         "ruleset": [
             {
-                "handledAccessFs": [
-                    "abi.all"
+                "unhandledAccessFs": [
+                    "execute"
                     ]
             }
         ]
@@ -108,17 +94,138 @@ fn test_access_fs_with_value() {
     let toml = r#"
         abi = 2
         [[ruleset]]
-        handled_access_fs = [
-            "abi.all",
+        unhandled_access_fs = [
+            "execute",
         ]
     "#;
 
     let policy = Policy {
         masks: RulesetMasks {
-            fs: AccessFs::from_all(ABI::V2),
-            ..Default::default()
+            fs: AccessFs::from_all(ABI::V2) & !AccessFs::Execute,
+            net: AccessNet::from_all(ABI::V2),
+            scope: Scope::from_all(ABI::V2),
         },
-        ..Policy::empty(ABI::V2)
+        ..Policy::new(ABI::V2)
+    };
+    assert_eq!(parse_json(json).unwrap(), policy);
+    assert_eq!(parse_toml(toml).unwrap(), policy);
+}
+
+#[test]
+fn test_known_inverse_access_outside_abi_is_inert() {
+    let json = r#"{
+        "abi": 1,
+        "ruleset": [{
+            "unhandledAccessFs": ["refer", "truncate", "ioctl_dev"],
+            "unhandledAccessNet": ["bind_tcp", "connect_tcp"],
+            "unscoped": ["abstract_unix_socket", "signal"]
+        }]
+    }"#;
+    let toml = r#"
+        abi = 1
+        [[ruleset]]
+        unhandled_access_fs = ["refer", "truncate", "ioctl_dev"]
+        unhandled_access_net = ["bind_tcp", "connect_tcp"]
+        unscoped = ["abstract_unix_socket", "signal"]
+    "#;
+
+    assert_eq!(parse_json(json).unwrap(), Policy::new(ABI::V1));
+    assert_eq!(parse_toml(toml).unwrap(), Policy::new(ABI::V1));
+}
+
+#[test]
+fn test_known_allowance_access_outside_abi_is_inert() {
+    let json = r#"{
+        "abi": 1,
+        "pathBeneath": [{
+            "allowedAccess": ["refer", "truncate", "ioctl_dev"],
+            "parent": ["."]
+        }],
+        "netPort": [{
+            "allowedAccess": ["bind_tcp", "connect_tcp"],
+            "port": [80]
+        }]
+    }"#;
+    let toml = r#"
+        abi = 1
+        [[path_beneath]]
+        allowed_access = ["refer", "truncate", "ioctl_dev"]
+        parent = ["."]
+        [[net_port]]
+        allowed_access = ["bind_tcp", "connect_tcp"]
+        port = [80]
+    "#;
+
+    assert_eq!(parse_json(json).unwrap(), Policy::new(ABI::V1));
+    assert_eq!(parse_toml(toml).unwrap(), Policy::new(ABI::V1));
+}
+
+#[test]
+fn test_future_abi_concrete_access() {
+    let json = format!(
+        r#"{{
+            "abi": {},
+            "ruleset": [{{
+                "unhandledAccessFs": ["execute"],
+                "unhandledAccessNet": ["bind_tcp"],
+                "unscoped": ["signal"]
+            }}]
+        }}"#,
+        i32::MAX
+    );
+    let toml = format!(
+        r#"
+            abi = {}
+            [[ruleset]]
+            unhandled_access_fs = ["execute"]
+            unhandled_access_net = ["bind_tcp"]
+            unscoped = ["signal"]
+        "#,
+        i32::MAX
+    );
+    let policy = Policy {
+        masks: RulesetMasks {
+            fs: AccessFs::from_all(LATEST_ABI) & !AccessFs::Execute,
+            net: AccessNet::ConnectTcp.into(),
+            scope: Scope::AbstractUnixSocket.into(),
+        },
+        ..Policy::new(LATEST_ABI)
+    };
+    assert_eq!(parse_json(&json).unwrap(), policy);
+    assert_eq!(parse_toml(&toml).unwrap(), policy);
+}
+
+#[test]
+fn test_group_only_no_op() {
+    let json = r#"{
+        "abi": 3,
+        "ruleset": [{
+            "unhandledAccessFs": ["execute"],
+            "unhandledAccessNet": ["abi.all"],
+            "unscoped": ["abi.all"]
+        }],
+        "netPort": [{
+            "allowedAccess": ["abi.all"],
+            "port": [80]
+        }]
+    }"#;
+    let toml = r#"
+        abi = 3
+        [[ruleset]]
+        unhandled_access_fs = ["execute"]
+        unhandled_access_net = ["abi.all"]
+        unscoped = ["abi.all"]
+        [[net_port]]
+        allowed_access = ["abi.all"]
+        port = [80]
+    "#;
+    let policy = Policy {
+        masks: RulesetMasks {
+            fs: AccessFs::from_all(ABI::V3) & !AccessFs::Execute,
+            net: AccessNet::from_all(ABI::V3),
+            scope: Scope::from_all(ABI::V3),
+        },
+        ..Policy::new(ABI::V3)
     };
     assert_eq!(parse_json(json).unwrap(), policy);
     assert_eq!(parse_toml(toml).unwrap(), policy);
@@ -129,7 +236,7 @@ fn test_missing() {
     let json = r#"{
         "ruleset": [
             {
-                "handledAccessFs": [
+                "unhandledAccessFs": [
                     "abi.all"
                     ]
             }
@@ -137,7 +244,7 @@ fn test_missing() {
     }"#;
     let toml = r#"
         [[ruleset]]
-        handled_access_fs = [
+        unhandled_access_fs = [
             "abi.all",
         ]
     "#;
@@ -147,7 +254,7 @@ fn test_missing() {
 }
 
 #[test]
-fn test_format_error() {
+fn test_abi_only() {
     let json = r#"{
         "abi": 1
     }"#;
@@ -155,8 +262,8 @@ fn test_format_error() {
         abi = 1
     "#;
 
-    assert_eq!(parse_json(json), Err(Category::Data));
-    assert!(parse_toml(toml).is_err());
+    assert_eq!(parse_json(json).unwrap(), Policy::new(ABI::V1));
+    assert_eq!(parse_toml(toml).unwrap(), Policy::new(ABI::V1));
 }
 
 #[test]
@@ -165,14 +272,14 @@ fn test_non_integer() {
         "abi": "6",
         "ruleset": [
             {
-                "handledAccessFs": ["execute"]
+                "unhandledAccessFs": ["execute"]
             }
         ]
     }"#;
     let toml = r#"
         abi = "6"
         [[ruleset]]
-        handled_access_fs = ["execute"]
+        unhandled_access_fs = ["execute"]
     "#;
 
     assert_eq!(parse_json(json), Err(Category::Data));
@@ -185,24 +292,25 @@ fn test_format_ok() {
         "abi": 1,
         "ruleset": [
             {
-                "handledAccessFs": [ "execute" ]
+                "unhandledAccessFs": [ "execute" ]
             }
         ]
     }"#;
     let toml = r#"
         abi = 1
         [[ruleset]]
-        handled_access_fs = [
+        unhandled_access_fs = [
             "execute",
         ]
     "#;
 
     let policy = Policy {
         masks: RulesetMasks {
-            fs: AccessFs::Execute.into(),
-            ..Default::default()
+            fs: AccessFs::from_all(ABI::V1) & !AccessFs::Execute,
+            net: AccessNet::from_all(ABI::V1),
+            scope: Scope::from_all(ABI::V1),
         },
-        ..Policy::empty(ABI::V1)
+        ..Policy::new(ABI::V1)
     };
     assert_eq!(parse_json(json).unwrap(), policy);
     assert_eq!(parse_toml(toml).unwrap(), policy);
@@ -215,7 +323,7 @@ fn test_dup_abi() {
         "abi": 1,
         "ruleset": [
             {
-                "handledAccessFs": [ "execute" ]
+                "unhandledAccessFs": [ "execute" ]
             }
         ]
     }"#;
@@ -223,7 +331,7 @@ fn test_dup_abi() {
         abi = 1
         abi = 1
         [[ruleset]]
-        handled_access_fs = [
+        unhandled_access_fs = [
             "execute",
         ]
     "#;
@@ -236,64 +344,21 @@ fn test_dup_abi() {
 }
 
 #[test]
-fn test_all_versions_abi_all() {
+fn test_all_versions_abi_defaults() {
     for version in 1..=(LATEST_ABI as i32) {
         let json = format!(
             r#"{{
-                "abi": {},
-                "ruleset": [
-                    {{
-                        "handledAccessFs": [ "abi.all" ],
-                        "handledAccessNet": [ "abi.all" ],
-                        "scoped": [ "abi.all" ]
-                    }}
-                ],
-                "pathBeneath": [
-                    {{
-                        "allowedAccess": [ "abi.all" ],
-                        "parent": [ "." ]
-                    }}
-                ],
-                "netPort": [
-                    {{
-                        "allowedAccess": [ "abi.all" ],
-                        "port": [ 1 ]
-                    }}
-                ]
-            }}"#,
-            version
+                "abi": {version}
+            }}"#
         );
         let toml = format!(
             r#"
-            abi = {}
-            [[ruleset]]
-            handled_access_fs = [ "abi.all" ]
-            handled_access_net = [ "abi.all" ]
-            scoped = [ "abi.all" ]
-            [[path_beneath]]
-            allowed_access = [ "abi.all" ]
-            parent = [ "." ]
-            [[net_port]]
-            allowed_access = [ "abi.all" ]
-            port = [ 1 ]
-            "#,
-            version
+                abi = {version}
+            "#
         );
 
         let abi = version.into();
-        let mut policy = Policy {
-            masks: RulesetMasks {
-                fs: AccessFs::from_all(abi),
-                net: AccessNet::from_all(abi),
-                scope: Scope::from_all(abi),
-            },
-            rules_path_beneath: [(TemplateString::from_text("."), AccessFs::from_all(abi))].into(),
-            ..Policy::empty(abi)
-        };
-        if abi >= ABI::V4 {
-            // Do not add rules with empty access right.
-            policy.rules_net_port = [(1, AccessNet::from_all(abi))].into();
-        }
+        let policy = Policy::new(abi);
         println!("Testing ABI {version} and expecting {policy:?}");
         assert_eq!(parse_json(&json).unwrap(), policy);
         assert_eq!(parse_toml(&toml).unwrap(), policy);
@@ -308,7 +373,7 @@ fn test_all_versions_abi_read_execute() {
                 "abi": {},
                 "ruleset": [
                     {{
-                        "handledAccessFs": [ "abi.read_execute" ]
+                        "unhandledAccessFs": [ "abi.read_execute" ]
                     }}
                 ],
                 "pathBeneath": [
@@ -324,7 +389,7 @@ fn test_all_versions_abi_read_execute() {
             r#"
             abi = {}
             [[ruleset]]
-            handled_access_fs = [ "abi.read_execute" ]
+            unhandled_access_fs = [ "abi.read_execute" ]
             [[path_beneath]]
             allowed_access = [ "abi.read_execute" ]
             parent = [ "." ]
@@ -333,16 +398,13 @@ fn test_all_versions_abi_read_execute() {
         );
 
         let abi = version.into();
-        let expected_access =
-            AccessFs::from_read(abi) | (AccessFs::from_all(abi) & AccessFs::Refer);
-
         let policy = Policy {
             masks: RulesetMasks {
-                fs: expected_access,
-                ..Default::default()
+                fs: AccessFs::from_write(abi) & !AccessFs::Refer,
+                net: AccessNet::from_all(abi),
+                scope: Scope::from_all(abi),
             },
-            rules_path_beneath: [(TemplateString::from_text("."), expected_access)].into(),
-            ..Policy::empty(abi)
+            ..Policy::new(abi)
         };
         println!("Testing ABI {version} read_execute and expecting {policy:?}");
         assert_eq!(parse_json(&json).unwrap(), policy);
@@ -358,7 +420,7 @@ fn test_all_versions_abi_read_write() {
                 "abi": {},
                 "ruleset": [
                     {{
-                        "handledAccessFs": [ "abi.read_write" ]
+                        "unhandledAccessFs": [ "abi.read_write" ]
                     }}
                 ],
                 "pathBeneath": [
@@ -374,7 +436,7 @@ fn test_all_versions_abi_read_write() {
             r#"
             abi = {}
             [[ruleset]]
-            handled_access_fs = [ "abi.read_write" ]
+            unhandled_access_fs = [ "abi.read_write" ]
             [[path_beneath]]
             allowed_access = [ "abi.read_write" ]
             parent = [ "." ]
@@ -383,15 +445,13 @@ fn test_all_versions_abi_read_write() {
         );
 
         let abi = version.into();
-        let expected_access = AccessFs::from_all(abi) & !AccessFs::Execute;
-
         let policy = Policy {
             masks: RulesetMasks {
-                fs: expected_access,
-                ..Default::default()
+                fs: AccessFs::Execute.into(),
+                net: AccessNet::from_all(abi),
+                scope: Scope::from_all(abi),
             },
-            rules_path_beneath: [(TemplateString::from_text("."), expected_access)].into(),
-            ..Policy::empty(abi)
+            ..Policy::new(abi)
         };
         println!("Testing ABI {version} read_write and expecting {policy:?}");
         assert_eq!(parse_json(&json).unwrap(), policy);
@@ -402,19 +462,10 @@ fn test_all_versions_abi_read_write() {
 #[test]
 fn test_zero() {
     let json = r#"{
-        "abi": 0,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "execute" ]
-            }
-        ]
+        "abi": 0
     }"#;
     let toml = r#"
         abi = 0
-        [[ruleset]]
-        handled_access_fs = [
-            "execute",
-        ]
     "#;
 
     assert_eq!(parse_json(json), Err(Category::Data));
@@ -424,19 +475,10 @@ fn test_zero() {
 #[test]
 fn test_negative() {
     let json = r#"{
-        "abi": -1,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "execute" ]
-            }
-        ]
+        "abi": -1
     }"#;
     let toml = r#"
         abi = -1
-        [[ruleset]]
-        handled_access_fs = [
-            "execute",
-        ]
     "#;
 
     assert_eq!(parse_json(json), Err(Category::Data));
@@ -447,29 +489,14 @@ fn test_negative() {
 fn test_i32() {
     // 2^31 - 1
     let json = r#"{
-        "abi": 2147483647,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "abi.all" ]
-            }
-        ]
+        "abi": 2147483647
     }"#;
     let toml = r#"
         abi = 2147483647
-        [[ruleset]]
-        handled_access_fs = [
-            "abi.all",
-        ]
     "#;
-    let policy = Policy {
-        masks: RulesetMasks {
-            fs: AccessFs::from_all(LATEST_ABI),
-            ..Default::default()
-        },
-        ..Policy::empty(LATEST_ABI)
-    };
-    assert_eq!(parse_json(json).unwrap(), policy);
-    assert_eq!(parse_toml(toml).unwrap(), policy);
+
+    assert_eq!(parse_json(json).unwrap(), Policy::new(LATEST_ABI));
+    assert_eq!(parse_toml(toml).unwrap(), Policy::new(LATEST_ABI));
 }
 
 #[test]
@@ -479,7 +506,7 @@ fn test_future_abi_unknown_syntax() {
             "abi": 2147483647,
             "ruleset": [
                 {
-                    "handledAccessFs": ["future_right"]
+                    "unhandledAccessFs": ["future_right"]
                 }
             ]
         }"#,
@@ -500,7 +527,7 @@ fn test_future_abi_unknown_syntax() {
         r#"
             abi = 2147483647
             [[ruleset]]
-            handled_access_fs = ["future_right"]
+            unhandled_access_fs = ["future_right"]
         "#,
         r#"
             abi = 2147483647
@@ -525,19 +552,10 @@ fn test_future_abi_unknown_syntax() {
 fn test_p31() {
     // 2^31
     let json = r#"{
-        "abi": 2147483648,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "abi.all" ]
-            }
-        ]
+        "abi": 2147483648
     }"#;
     let toml = r#"
         abi = 2147483648
-        [[ruleset]]
-        handled_access_fs = [
-            "abi.all",
-        ]
     "#;
 
     assert_eq!(parse_json(json), Err(Category::Data));
@@ -548,19 +566,10 @@ fn test_p31() {
 fn test_p32() {
     // 2^32
     let json = r#"{
-        "abi": 4294967295,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "execute" ]
-            }
-        ]
+        "abi": 4294967295
     }"#;
     let toml = r#"
         abi = 4294967295
-        [[ruleset]]
-        handled_access_fs = [
-            "execute",
-        ]
     "#;
 
     assert_eq!(parse_json(json), Err(Category::Data));
@@ -571,19 +580,10 @@ fn test_p32() {
 fn test_p64() {
     // 2^64
     let json = r#"{
-        "abi": 18446744073709551616,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "execute" ]
-            }
-        ]
+        "abi": 18446744073709551616
     }"#;
     let toml = r#"
         abi = 18446744073709551616
-        [[ruleset]]
-        handled_access_fs = [
-            "execute",
-        ]
     "#;
 
     assert_eq!(parse_json(json), Err(Category::Data));
@@ -594,19 +594,10 @@ fn test_p64() {
 fn test_p128() {
     // 2^128
     let json = r#"{
-        "abi": 340282366920938463463374607431768211456,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "execute" ]
-            }
-        ]
+        "abi": 340282366920938463463374607431768211456
     }"#;
     let toml = r#"
         abi = 340282366920938463463374607431768211456
-        [[ruleset]]
-        handled_access_fs = [
-            "execute",
-        ]
     "#;
 
     assert_eq!(parse_json(json), Err(Category::Data));
