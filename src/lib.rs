@@ -32,3 +32,6 @@ mod tests_compose;
 
 #[cfg(test)]
 mod tests_abi;
+
+#[cfg(test)]
+mod tests_inverse;

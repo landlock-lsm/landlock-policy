@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "Landlock security policy schema",
+  "description": "Landlock security policy schema. Schema validity is necessary but not sufficient: after ABI clamping and access-group resolution, the parser rejects a policy whose filesystem, network, and scope masks are all empty. That aggregate check cannot be expressed by this schema. When a requested ABI is newer than the parser recognizes, the clamped masks and emptiness result also depend on the parsing library's recognized format ceiling.",
   "type": "object",
   "definitions": {
     "uint64": {
@@ -57,7 +57,7 @@
   },
   "properties": {
     "abi": {
-      "description": "The mandatory Landlock ABI version used to resolve access groups.",
+      "description": "The mandatory Landlock ABI version used to resolve access groups and derive omitted ruleset categories.",
       "allOf": [
         {
           "$ref": "#/definitions/abi"
@@ -88,38 +88,48 @@
       }
     },
     "ruleset": {
+      "description": "Advanced compatibility exclusions from ABI-derived handled and scoped masks. Most policies should omit this property and use the complete masks with targeted allowances. Repeated entries are source fragments whose exclusions are unioned before resolving one policy mask. Omitted fields, JSON-null fields, and empty inverse arrays contribute no exclusions; no-op fragments are valid for mechanical generation. The parser rejects the policy if all three final masks are empty after ABI clamping and resolution; the schema cannot express that implementation-dependent aggregate check.",
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
         "properties": {
-          "handledAccessFs": {
-            "type": "array",
-            "minItems": 1,
+          "unhandledAccessFs": {
+            "description": "Compatibility exceptions removed from the complete effective-ABI handled_access_fs mask. Most policies should omit this field. Removing a right usually stops this Landlock layer from restricting it but does not override other restrictions. The refer right is special: removing it while another filesystem right remains handled makes Landlock deny cross-directory reparenting with EXDEV. Omission, JSON null, and an empty array remove nothing. Values use ordinary set union; duplicates and abi.all combinations are valid.",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
               "$ref": "#/definitions/accessFs"
             }
           },
-          "handledAccessNet": {
-            "type": "array",
-            "minItems": 1,
+          "unhandledAccessNet": {
+            "description": "Compatibility exceptions removed from the complete effective-ABI handled_access_net mask. Most policies should omit this field. Removing a right stops this Landlock layer from restricting it but does not override other restrictions. Omission, JSON null, and an empty array remove nothing. Values use ordinary set union; duplicates and abi.all combinations are valid.",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
               "$ref": "#/definitions/accessNet"
             }
           },
-          "scoped": {
-            "type": "array",
-            "minItems": 1,
+          "unscoped": {
+            "description": "Compatibility exceptions removed from the complete effective-ABI scoped mask. Most policies should omit this field. Removing a scope stops this Landlock layer from isolating it but does not override other restrictions. Omission, JSON null, and an empty array remove nothing. Values use ordinary set union; duplicates and abi.all combinations are valid.",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
               "$ref": "#/definitions/scope"
             }
           }
         },
-        "minProperties": 1,
         "additionalProperties": false
       }
     },
     "pathBeneath": {
+      "description": "Filesystem rules. Allowed rights are limited to the final handled filesystem mask; fully masked rules are skipped.",
       "type": "array",
       "minItems": 1,
       "items": {
@@ -148,6 +158,7 @@
       }
     },
     "netPort": {
+      "description": "Network port rules. Allowed rights are limited to the final handled network mask; fully masked rules are skipped.",
       "type": "array",
       "minItems": 1,
       "items": {
@@ -178,28 +189,6 @@
   },
   "required": [
     "abi"
-  ],
-  "anyOf": [
-    {
-      "required": [
-        "variable"
-      ]
-    },
-    {
-      "required": [
-        "ruleset"
-      ]
-    },
-    {
-      "required": [
-        "pathBeneath"
-      ]
-    },
-    {
-      "required": [
-        "netPort"
-      ]
-    }
   ],
   "additionalProperties": false
 }

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::{
-    nonempty::{NonEmptySet, NonEmptyStruct, NonEmptyStructInner},
-    variable::Name,
-};
+use crate::{nonempty::NonEmptySet, variable::Name};
 use landlock::{Access, AccessFs, AccessNet, BitFlags, Scope, ABI};
 use serde::de::{Unexpected, Visitor};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -579,61 +576,31 @@ impl From<&JsonScopeItem> for ValueScope {
     }
 }
 
-// At least one of the fields must be set, which is guaranteed when wrapped with NonEmptyStruct.
+// Redundant inverse items are valid set syntax.  A future source-level linter
+// must inspect them before normalization discards their provenance.
 #[derive(Debug, Deserialize, Ord, Eq, PartialOrd, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[allow(non_snake_case)]
 pub(crate) struct JsonRuleset {
-    pub(crate) handledAccessFs: Option<NonEmptySet<JsonFsAccessItem>>,
-    pub(crate) handledAccessNet: Option<NonEmptySet<JsonNetAccessItem>>,
-    pub(crate) scoped: Option<NonEmptySet<JsonScopeItem>>,
+    pub(crate) unhandledAccessFs: Option<Vec<JsonFsAccessItem>>,
+    pub(crate) unhandledAccessNet: Option<Vec<JsonNetAccessItem>>,
+    pub(crate) unscoped: Option<Vec<JsonScopeItem>>,
 }
 
-impl NonEmptyStructInner for JsonRuleset {
-    const ERROR_MESSAGE: &'static str = "empty ruleset";
-
-    fn is_empty(&self) -> bool {
-        self.handledAccessFs
-            .as_ref()
-            .is_none_or(|set| set.is_empty())
-            && self
-                .handledAccessNet
-                .as_ref()
-                .is_none_or(|set| set.is_empty())
-            && self.scoped.as_ref().is_none_or(|set| set.is_empty())
-    }
-}
-
-// At least one of the fields must be set, which is guaranteed when wrapped with NonEmptyStruct.
 #[derive(Debug, Deserialize, Ord, Eq, PartialOrd, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct TomlRuleset {
-    handled_access_fs: Option<NonEmptySet<JsonFsAccessItem>>,
-    handled_access_net: Option<NonEmptySet<JsonNetAccessItem>>,
-    scoped: Option<NonEmptySet<JsonScopeItem>>,
-}
-
-impl NonEmptyStructInner for TomlRuleset {
-    const ERROR_MESSAGE: &'static str = "empty ruleset";
-
-    fn is_empty(&self) -> bool {
-        self.handled_access_fs
-            .as_ref()
-            .is_none_or(|set| set.is_empty())
-            && self
-                .handled_access_net
-                .as_ref()
-                .is_none_or(|set| set.is_empty())
-            && self.scoped.as_ref().is_none_or(|set| set.is_empty())
-    }
+    unhandled_access_fs: Option<Vec<JsonFsAccessItem>>,
+    unhandled_access_net: Option<Vec<JsonNetAccessItem>>,
+    unscoped: Option<Vec<JsonScopeItem>>,
 }
 
 impl From<TomlRuleset> for JsonRuleset {
     fn from(toml: TomlRuleset) -> Self {
         Self {
-            handledAccessFs: toml.handled_access_fs,
-            handledAccessNet: toml.handled_access_net,
-            scoped: toml.scoped,
+            unhandledAccessFs: toml.unhandled_access_fs,
+            unhandledAccessNet: toml.unhandled_access_net,
+            unscoped: toml.unscoped,
         }
     }
 }
@@ -758,49 +725,25 @@ pub(crate) struct JsonVariable {
 
 type TomlVariable = JsonVariable;
 
-// At least one of the fields must be set, which is guaranteed when wrapped with NonEmptyStruct.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(non_snake_case)]
 pub(crate) struct JsonPolicy {
     pub(crate) abi: JsonAbi,
     pub(crate) variable: Option<NonEmptySet<JsonVariable>>,
-    pub(crate) ruleset: Option<NonEmptySet<NonEmptyStruct<JsonRuleset>>>,
+    pub(crate) ruleset: Option<NonEmptySet<JsonRuleset>>,
     pub(crate) pathBeneath: Option<NonEmptySet<JsonPathBeneath>>,
     pub(crate) netPort: Option<NonEmptySet<JsonNetPort>>,
 }
 
-impl NonEmptyStructInner for JsonPolicy {
-    const ERROR_MESSAGE: &'static str = "empty policy";
-
-    fn is_empty(&self) -> bool {
-        self.variable.as_ref().is_none_or(|set| set.is_empty())
-            && self.ruleset.as_ref().is_none_or(|set| set.is_empty())
-            && self.pathBeneath.as_ref().is_none_or(|set| set.is_empty())
-            && self.netPort.as_ref().is_none_or(|set| set.is_empty())
-    }
-}
-
-// At least one of the fields must be set, which is guaranteed when wrapped with NonEmptyStruct.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TomlPolicy {
     abi: JsonAbi,
     variable: Option<NonEmptySet<TomlVariable>>,
-    ruleset: Option<NonEmptySet<NonEmptyStruct<TomlRuleset>>>,
+    ruleset: Option<NonEmptySet<TomlRuleset>>,
     path_beneath: Option<NonEmptySet<TomlPathBeneath>>,
     net_port: Option<NonEmptySet<TomlNetPort>>,
-}
-
-impl NonEmptyStructInner for TomlPolicy {
-    const ERROR_MESSAGE: &'static str = "empty policy";
-
-    fn is_empty(&self) -> bool {
-        self.variable.as_ref().is_none_or(|set| set.is_empty())
-            && self.ruleset.as_ref().is_none_or(|set| set.is_empty())
-            && self.path_beneath.as_ref().is_none_or(|set| set.is_empty())
-            && self.net_port.as_ref().is_none_or(|set| set.is_empty())
-    }
 }
 
 impl From<TomlPolicy> for JsonPolicy {
@@ -810,7 +753,7 @@ impl From<TomlPolicy> for JsonPolicy {
             variable: toml.variable,
             ruleset: toml
                 .ruleset
-                .map(|set| set.into_iter().map(|r| r.convert()).collect()),
+                .map(|set| set.into_iter().map(Into::into).collect()),
             pathBeneath: toml
                 .path_beneath
                 .map(|set| set.into_iter().map(Into::into).collect()),

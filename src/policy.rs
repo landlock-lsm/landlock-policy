@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::nonempty::NonEmptyStruct;
-use crate::parser::{JsonPolicy, JsonRuleset, TemplateString, TomlPolicy};
+use crate::nonempty::NonEmptySet;
+use crate::parser::{JsonPolicy, JsonRuleset, PolicyAccessItem, TemplateString, TomlPolicy};
 use crate::variable::{NameError, ResolveError, Variables, VecStringIterator};
 use landlock::{
-    AccessFs, AccessNet, BitFlags, NetPort, PathBeneath, PathFd, PathFdError, Ruleset, RulesetAttr,
-    RulesetCreated, RulesetCreatedAttr, RulesetError, Scope, ABI,
+    Access, AccessFs, AccessNet, BitFlags, NetPort, PathBeneath, PathFd, PathFdError, Ruleset,
+    RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetError, Scope, ABI,
 };
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::num::TryFromIntError;
-use std::ops::{BitAnd, BitOr};
+use std::ops::{BitAnd, BitOr, Sub};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -30,6 +30,20 @@ pub(crate) struct RulesetMasks {
     pub(crate) fs: BitFlags<AccessFs>,
     pub(crate) net: BitFlags<AccessNet>,
     pub(crate) scope: BitFlags<Scope>,
+}
+
+impl RulesetMasks {
+    fn from_all(abi: ABI) -> Self {
+        Self {
+            fs: AccessFs::from_all(abi),
+            net: AccessNet::from_all(abi),
+            scope: Scope::from_all(abi),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl BitOr for RulesetMasks {
@@ -52,6 +66,18 @@ impl BitAnd for RulesetMasks {
             fs: self.fs & rhs.fs,
             net: self.net & rhs.net,
             scope: self.scope & rhs.scope,
+        }
+    }
+}
+
+impl Sub for RulesetMasks {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self {
+            fs: self.fs & !rhs.fs,
+            net: self.net & !rhs.net,
+            scope: self.scope & !rhs.scope,
         }
     }
 }
@@ -81,56 +107,85 @@ pub struct ResolvedPolicy {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PolicyError {
     #[error(transparent)]
     Name(#[from] NameError),
     #[error(transparent)]
     Resolve(#[from] ResolveError),
+    #[error("policy does not handle or scope any rights")]
+    EmptyRuleset,
 }
 
-impl TryFrom<NonEmptyStruct<JsonPolicy>> for Policy {
+fn extend_exclusions<T>(policy_abi: ABI, items: &[T], exclusions: &mut BitFlags<T::Access>)
+where
+    T: PolicyAccessItem,
+{
+    for item in items {
+        *exclusions |= item.resolve(policy_abi);
+    }
+}
+
+fn resolve_allowance<T>(
+    policy_abi: ABI,
+    items: &NonEmptySet<T>,
+    handled: BitFlags<T::Access>,
+) -> BitFlags<T::Access>
+where
+    T: PolicyAccessItem,
+{
+    items.resolve_bitflags(policy_abi) & handled
+}
+
+impl TryFrom<JsonPolicy> for Policy {
     type Error = PolicyError;
 
-    fn try_from(json: NonEmptyStruct<JsonPolicy>) -> Result<Self, Self::Error> {
-        let json = json.into_inner();
-        let mut policy = Self::empty(json.abi.into());
+    fn try_from(json: JsonPolicy) -> Result<Self, Self::Error> {
+        let JsonPolicy {
+            abi,
+            variable,
+            ruleset,
+            pathBeneath,
+            netPort,
+        } = json;
+        let mut policy = Self::new(abi.into());
 
-        for variable in json.variable.unwrap_or_default() {
+        for variable in variable.unwrap_or_default() {
             let name = variable.name.parse()?;
             let literal = variable.literal.unwrap_or_default();
             // TODO: Check and warn if users tried to use variable in literal strings?
             policy.variables.extend(name, literal);
         }
 
-        for ruleset in json.ruleset.unwrap_or_default() {
+        let mut exclusions = RulesetMasks::default();
+        for ruleset in ruleset.into_iter().flatten() {
             let JsonRuleset {
-                handledAccessFs,
-                handledAccessNet,
-                scoped,
-            } = ruleset.into_inner();
-            policy.masks = policy.masks
-                | RulesetMasks {
-                    fs: handledAccessFs
-                        .map(|access| access.resolve_bitflags(policy.abi))
-                        .unwrap_or_default(),
-                    net: handledAccessNet
-                        .map(|access| access.resolve_bitflags(policy.abi))
-                        .unwrap_or_default(),
-                    scope: scoped
-                        .map(|scoped| scoped.resolve_bitflags(policy.abi))
-                        .unwrap_or_default(),
-                };
+                unhandledAccessFs,
+                unhandledAccessNet,
+                unscoped,
+            } = ruleset;
+            let mut fragment = RulesetMasks::default();
+            if let Some(access) = unhandledAccessFs {
+                extend_exclusions(policy.abi, &access, &mut fragment.fs);
+            }
+            if let Some(access) = unhandledAccessNet {
+                extend_exclusions(policy.abi, &access, &mut fragment.net);
+            }
+            if let Some(access) = unscoped {
+                extend_exclusions(policy.abi, &access, &mut fragment.scope);
+            }
+            exclusions = exclusions | fragment;
         }
 
-        for path_beneath in json.pathBeneath.unwrap_or_default() {
-            let access = path_beneath.allowedAccess.resolve_bitflags(policy.abi);
+        policy.masks = RulesetMasks::from_all(policy.abi) - exclusions;
+
+        for path_beneath in pathBeneath.unwrap_or_default() {
+            let access =
+                resolve_allowance(policy.abi, &path_beneath.allowedAccess, policy.masks.fs);
 
             // It is possible to have rules with empty access because of empty
-            // access group resolution.
+            // access group resolution or exclusion masking.
             if !access.is_empty() {
-                // Automatically augment and keep the ruleset consistent.
-                policy.masks.fs |= access;
-
                 for parent in path_beneath.parent {
                     policy
                         .rules_path_beneath
@@ -141,15 +196,12 @@ impl TryFrom<NonEmptyStruct<JsonPolicy>> for Policy {
             }
         }
 
-        for net_port in json.netPort.unwrap_or_default() {
-            let access = net_port.allowedAccess.resolve_bitflags(policy.abi);
+        for net_port in netPort.unwrap_or_default() {
+            let access = resolve_allowance(policy.abi, &net_port.allowedAccess, policy.masks.net);
 
             // It is possible to have rules with empty access because of empty
-            // access group resolution.
+            // access group resolution or exclusion masking.
             if !access.is_empty() {
-                // Automatically augment and keep the ruleset consistent.
-                policy.masks.net |= access;
-
                 for port in net_port.port {
                     policy
                         .rules_net_port
@@ -158,6 +210,10 @@ impl TryFrom<NonEmptyStruct<JsonPolicy>> for Policy {
                         .or_insert(access);
                 }
             }
+        }
+
+        if policy.masks.is_empty() {
+            return Err(PolicyError::EmptyRuleset);
         }
 
         Ok(policy)
@@ -251,11 +307,22 @@ impl PolicyFormat {
 impl Policy {
     // Policy cannot implement Default because every policy requires an
     // explicit ABI.
+    pub(crate) fn new(abi: ABI) -> Self {
+        Self {
+            abi,
+            variables: Default::default(),
+            masks: RulesetMasks::from_all(abi),
+            rules_path_beneath: Default::default(),
+            rules_net_port: Default::default(),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn empty(abi: ABI) -> Self {
         Self {
             abi,
             variables: Default::default(),
-            masks: Default::default(),
+            masks: RulesetMasks::default(),
             rules_path_beneath: Default::default(),
             rules_net_port: Default::default(),
         }
@@ -337,7 +404,7 @@ impl Policy {
     where
         R: std::io::Read,
     {
-        let json = serde_json::from_reader::<_, NonEmptyStruct<JsonPolicy>>(reader)?;
+        let json = serde_json::from_reader::<_, JsonPolicy>(reader)?;
         Ok(json.try_into()?)
     }
 
@@ -345,8 +412,7 @@ impl Policy {
     pub fn parse_toml(data: &str) -> Result<Self, ParseTomlError> {
         // The TOML parser does not handle Read implementations,
         // see https://github.com/toml-rs/toml/issues/326
-        let json: NonEmptyStruct<JsonPolicy> =
-            toml::from_str::<NonEmptyStruct<TomlPolicy>>(data)?.convert();
+        let json: JsonPolicy = toml::from_str::<TomlPolicy>(data)?.into();
         Ok(json.try_into()?)
     }
 
@@ -430,6 +496,13 @@ impl Policy {
     pub fn resolve(self) -> Result<ResolvedPolicy, ResolveError> {
         self.try_into()
     }
+}
+
+#[test]
+fn test_policy_new() {
+    let policy = Policy::new(ABI::V6);
+    assert_eq!(policy.abi, ABI::V6);
+    assert_eq!(policy.masks, RulesetMasks::from_all(ABI::V6));
 }
 
 #[test]
@@ -532,15 +605,30 @@ mod tests_compose {
     use super::*;
     use landlock::{Access, ABI};
 
+    fn policy(
+        abi: ABI,
+        handled_fs: BitFlags<AccessFs>,
+        handled_net: BitFlags<AccessNet>,
+        scoped: BitFlags<Scope>,
+    ) -> Policy {
+        Policy {
+            masks: RulesetMasks {
+                fs: handled_fs,
+                net: handled_net,
+                scope: scoped,
+            },
+            ..Policy::new(abi)
+        }
+    }
+
     #[test]
     fn test_empty_ruleset() {
-        let mut c1 = Policy {
-            masks: RulesetMasks {
-                fs: AccessFs::Execute.into(),
-                ..Default::default()
-            },
-            ..Policy::empty(ABI::V1)
-        };
+        let mut c1 = policy(
+            ABI::V1,
+            AccessFs::Execute.into(),
+            BitFlags::EMPTY,
+            BitFlags::EMPTY,
+        );
         let c2 = c1.clone();
         c1.compose(&c2);
         assert_eq!(c1, c2);
@@ -548,20 +636,18 @@ mod tests_compose {
 
     #[test]
     fn test_different_ruleset() {
-        let mut c1 = Policy {
-            masks: RulesetMasks {
-                fs: AccessFs::Execute.into(),
-                ..Default::default()
-            },
-            ..Policy::empty(ABI::V4)
-        };
-        let c2 = Policy {
-            masks: RulesetMasks {
-                net: AccessNet::BindTcp.into(),
-                ..Default::default()
-            },
-            ..Policy::empty(ABI::V4)
-        };
+        let mut c1 = policy(
+            ABI::V4,
+            AccessFs::Execute.into(),
+            BitFlags::EMPTY,
+            BitFlags::EMPTY,
+        );
+        let c2 = policy(
+            ABI::V4,
+            BitFlags::EMPTY,
+            AccessNet::BindTcp.into(),
+            BitFlags::EMPTY,
+        );
         let expect = Policy::empty(ABI::V4);
         c1.compose(&c2);
         assert_eq!(c1, expect);
@@ -570,58 +656,94 @@ mod tests_compose {
     #[test]
     fn test_compose_v1_v2_without_one_right() {
         let c1_access = AccessFs::from_all(ABI::V1);
-        let mut c1 = Policy {
-            masks: RulesetMasks {
-                fs: c1_access,
-                ..Default::default()
-            },
-            rules_path_beneath: [
-                (TemplateString::from_text("/common"), c1_access),
-                (TemplateString::from_text("/c1"), c1_access),
-            ]
-            .into(),
-            ..Policy::empty(ABI::V1)
-        };
+        let mut c1 = policy(ABI::V1, c1_access, BitFlags::EMPTY, BitFlags::EMPTY);
+        c1.rules_path_beneath = [
+            (TemplateString::from_text("/common"), c1_access),
+            (TemplateString::from_text("/c1"), c1_access),
+        ]
+        .into();
 
         assert!(c1_access.contains(AccessFs::WriteFile));
         let c2_access = AccessFs::from_all(ABI::V2) & !AccessFs::WriteFile;
-        let c2 = Policy {
-            masks: RulesetMasks {
-                fs: c2_access,
-                ..Default::default()
-            },
-            rules_path_beneath: [
-                (TemplateString::from_text("/common"), c2_access),
-                (TemplateString::from_text("/c2"), c2_access),
-            ]
-            .into(),
-            ..Policy::empty(ABI::V2)
-        };
+        let mut c2 = policy(ABI::V2, c2_access, BitFlags::EMPTY, BitFlags::EMPTY);
+        c2.rules_path_beneath = [
+            (TemplateString::from_text("/common"), c2_access),
+            (TemplateString::from_text("/c2"), c2_access),
+        ]
+        .into();
 
         c1.compose(&c2);
         assert_eq!(
             c1,
             Policy {
-                masks: RulesetMasks {
-                    fs: c1_access & c2_access,
-                    ..Default::default()
-                },
                 rules_path_beneath: [
                     (TemplateString::from_text("/common"), c1_access & c2_access),
                     (TemplateString::from_text("/c1"), c1_access & c2_access),
                     (TemplateString::from_text("/c2"), c1_access & c2_access),
                 ]
                 .into(),
-                ..Policy::empty(ABI::V1)
+                ..policy(
+                    ABI::V1,
+                    c1_access & c2_access,
+                    BitFlags::EMPTY,
+                    BitFlags::EMPTY,
+                )
             }
         );
     }
 
     #[test]
+    fn test_compose_associativity() {
+        let mut first = policy(
+            ABI::V6,
+            AccessFs::from_all(ABI::V6) & !AccessFs::Execute,
+            AccessNet::from_all(ABI::V6),
+            Scope::from_all(ABI::V6) & !Scope::Signal,
+        );
+        first.rules_path_beneath =
+            [(TemplateString::from_text("a"), AccessFs::ReadFile.into())].into();
+
+        let mut second = policy(
+            ABI::V6,
+            AccessFs::from_all(ABI::V6) & !AccessFs::WriteFile,
+            AccessNet::from_all(ABI::V6),
+            Scope::from_all(ABI::V6) & !Scope::AbstractUnixSocket,
+        );
+        second.rules_path_beneath =
+            [(TemplateString::from_text("b"), AccessFs::ReadFile.into())].into();
+
+        let mut third = policy(
+            ABI::V6,
+            AccessFs::from_all(ABI::V6) & !AccessFs::RemoveFile,
+            AccessNet::from_all(ABI::V6),
+            Scope::from_all(ABI::V6),
+        );
+        third.rules_path_beneath =
+            [(TemplateString::from_text("c"), AccessFs::ReadFile.into())].into();
+
+        let mut left = first.clone();
+        left.compose(&second);
+        left.compose(&third);
+
+        second.compose(&third);
+        first.compose(&second);
+
+        assert_eq!(left, first);
+        assert_eq!(left.abi, ABI::V6);
+        assert_eq!(
+            left.masks.fs,
+            AccessFs::from_all(ABI::V6)
+                & !(AccessFs::Execute | AccessFs::WriteFile | AccessFs::RemoveFile)
+        );
+        assert!(left.masks.scope.is_empty());
+        assert_eq!(left.rules_path_beneath.len(), 3);
+    }
+
+    #[test]
     fn test_abi_minimum() {
-        let c1 = Policy::empty(ABI::V1);
+        let c1 = Policy::new(ABI::V1);
         let mut c1_mut = c1.clone();
-        let mut c2_mut = Policy::empty(ABI::V2);
+        let mut c2_mut = Policy::new(ABI::V2);
 
         c1_mut.compose(&c2_mut);
         assert_eq!(c1_mut.abi, ABI::V1);

@@ -66,12 +66,19 @@ that its component tolerates that restriction. When every component handles a
 right, the composed policy retains the resource allowances requested by all of
 them.
 
-A policy can therefore weaken the resulting confinement by leaving rights out
-of an explicit handled array or requesting broad allowances. The caller must
+A policy can therefore usually weaken the resulting confinement by excluding
+handled rights or scopes, selecting a lower ABI, or requesting broad
+allowances. The `refer` exclusion is exceptional: while another filesystem
+right remains handled, it instead makes Landlock deny cross-directory
+reparenting with `EXDEV`. Composition uses the minimum effective ABI, so one
+lower-ABI component removes categories and rights added by later ABIs from the
+composed masks. Parsing a future ABI on an older implementation likewise clamps
+its masks to that implementation's recognized format ceiling. The caller must
 trust every selected policy to state its component's compatibility requirements
-accurately. Composition provides confinement only to the extent implied by the
-selected compatibility declarations. It is not a security boundary between
-mutually distrusting policy authors. It cannot prove that a component was tested
+accurately.
+Composition provides confinement only to the extent implied by the selected
+compatibility declarations. It is not a security boundary between mutually
+distrusting policy authors. It cannot prove that a component was tested
 correctly.
 
 When restrictions come from independent security authorities and must not be
@@ -128,6 +135,11 @@ ABI v6. This preserves the known subset of a future policy, but it does not make
 unknown access names, properties, or rule types valid; unknown syntax remains an
 error.
 
+Parser-known access and scope names remain valid at every policy ABI. The ABI
+defines the effective mask universe, so a known value outside that universe is
+inert when excluded or allowed. Positive `abi.*` groups likewise resolve only
+to rights supported by that ABI and may resolve to an empty set.
+
 **TODO:**
 In the case of an older user space and a newer kernel, it should be possible for
 users to still leverage a subset of the newer kernel features.  This means that
@@ -153,9 +165,84 @@ version](https://landlock.io/rust-landlock/landlock/enum.ABI.html).
 
 ### Flexible policies
 
-The parser should limit error cases as much as possible. One way to achieve that
-is to automatically complete the known properties (e.g., handled access rights
-are automatically completed according to all used access rights).
+The parser automatically completes known properties with secure defaults.
+Filesystem and network handling, and process scoping, each start with every
+right supported by the effective policy ABI. The optional inverse fields remove
+rights from those complete masks:
+
+- `unhandledAccessFs` (`unhandled_access_fs` in TOML) removes rights from the
+  Landlock `handled_access_fs` mask;
+- `unhandledAccessNet` (`unhandled_access_net`) removes rights from
+  `handled_access_net`;
+- `unscoped` removes rights from `scoped`.
+
+Omitting a field, setting an optional JSON property to `null`, or using an empty
+array removes nothing. Omission is the canonical, shortest, and strongest
+representation. Repeated ruleset entries are source fragments: their
+exclusions are unioned before resolving one UAPI mask, not installed as
+independent Landlock layers. Path and port rules remain positive allowances and
+never add rights back to handled masks.
+
+A directly parsed policy whose final three masks are empty is rejected.
+Composition remains infallible and intersects concrete masks, so it may produce
+an empty policy; building that composition then fails because there is no
+handled access. Independent security authorities should instead install
+separate stacked Landlock layers.
+
+### Deliberate exclusions
+
+Use an inverse field only for a reviewed compatibility requirement. For
+example, this complete policy handles every ABI 5 right except device-control
+operations while granting read/write access below `/tmp`:
+
+```json
+{
+  "abi": 5,
+  "ruleset": [{
+    "unhandledAccessFs": ["ioctl_dev"]
+  }],
+  "pathBeneath": [{
+    "allowedAccess": ["abi.read_write"],
+    "parent": ["/tmp"]
+  }]
+}
+```
+
+```toml
+abi = 5
+
+[[ruleset]]
+unhandled_access_fs = ["ioctl_dev"]
+
+[[path_beneath]]
+allowed_access = ["abi.read_write"]
+parent = ["/tmp"]
+```
+
+A concrete exclusion is fixed to that known right. An `abi.*` group is an
+ABI-relative, future-expanding contract. Inverse values use ordinary set union:
+duplicates and `abi.all` beside other known items are valid and idempotent.
+Omission, JSON null, and an empty array all mean no exclusions, which lets
+scripts and serializers emit computed optional sets without deleting empty
+properties.
+
+Rules are reconciled after exclusions by intersecting every concrete or group
+allowance with the final handled mask. A fully masked rule is skipped. This does
+not grant an unhandled operation: this Landlock layer already does not restrict
+that operation, and other Landlock layers or security mechanisms may still deny
+it.
+
+Excluding `refer` is an exact handled-mask operation, not permission to reparent
+files. Landlock implicitly denies cross-directory reparenting when another
+filesystem right is handled unless a matching `refer` rule permits it. To avoid
+`EXDEV`, prefer targeted `refer` allowances; where that is unsuitable, use the
+application's documented copy/write/remove fallback.
+
+Prefer, in order: the complete ABI mask, targeted path or port allowances, one
+concrete global exclusion, a deliberate semantic-group exclusion, and finally
+`abi.all` only when permanently disabling a category. Changing a policy ABI,
+exclusion, variable, or allowance changes its compatibility contract and
+requires retesting by the component owner.
 
 ## Reference implementation
 
@@ -307,3 +394,45 @@ Policies accepted by earlier versions may require these updates:
 - Every policy must declare the Landlock ABI against which it was tested.
   Choose the tested compatibility contract rather than blindly selecting the
   newest ABI.
+- The positive `handled_access_fs`, `handled_access_net`, and `scoped` fields
+  are replaced by inverse `unhandled_access_fs`, `unhandled_access_net`, and
+  `unscoped` fields. Omission, JSON null, or an empty array selects the complete
+  effective-ABI mask.
+
+To migrate, first resolve the old policy at a selected, tested ABI. Its old
+filesystem and network masks include access named by path and port rules:
+
+```text
+old_base_fs = union(old handled_access_fs arrays), if present; empty otherwise
+old_base_net = union(old handled_access_net arrays), if present; empty otherwise
+old_base_scope = union(old scoped arrays), if present; empty otherwise
+old_final_fs = old_base_fs | old_path_rule_access
+old_final_net = old_base_net | old_port_rule_access
+old_final_scope = old_base_scope
+unhandled_access_fs = fs_from_all(selected_abi) - old_final_fs
+unhandled_access_net = net_from_all(selected_abi) - old_final_net
+unscoped = scope_from_all(selected_abi) - old_final_scope
+```
+
+Serialize that complement, not the old positive array. Migration cannot infer
+whether later rights should be excluded as fixed concrete names, through a
+future-expanding semantic group, or permanently with `abi.all`; the policy
+owner must choose and test that future contract.
+
+For example, an old policy that handled only filesystem execution resolves at
+ABI 6 to an execution-only filesystem mask and empty network and scope masks.
+Its direct concrete complement is verbose; if the owner's durable intent is to
+permanently disable network and scoping, it may begin as:
+
+```toml
+abi = 6
+
+[[ruleset]]
+unhandled_access_fs = [
+  "write_file", "read_file", "read_dir", "remove_dir", "remove_file",
+  "make_char", "make_dir", "make_reg", "make_sock", "make_fifo",
+  "make_block", "make_sym", "refer", "truncate", "ioctl_dev",
+]
+unhandled_access_net = ["abi.all"]
+unscoped = ["abi.all"]
+```

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::{policy::ResolvedPolicy, tests_helpers::parse_json, Policy};
-use landlock::{Access, AccessFs, AccessNet, Scope, ABI};
+use crate::{
+    policy::ResolvedPolicy,
+    tests_helpers::{parse_json, resolved_policy_with_abi_defaults},
+    BuildRulesetError, Policy,
+};
+use landlock::{Access, AccessFs, AccessNet, CreateRulesetError, RulesetError, Scope, ABI};
 use std::path::PathBuf;
 
 fn test_idempotence(policy: &Policy) {
@@ -34,14 +38,7 @@ fn get_composition(json1: &str, json2: &str) -> ResolvedPolicy {
 #[test]
 fn test_compose_most_fs_net() {
     let json1 = r#"{
-        "abi": 4,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "abi.all" ],
-                "handledAccessNet": [ "abi.all" ],
-                "scoped": [ "abi.all" ]
-            }
-        ]
+        "abi": 4
     }"#;
     let json2 = r#"{
         "abi": 6,
@@ -62,11 +59,9 @@ fn test_compose_most_fs_net() {
     assert_eq!(
         get_composition(json1, json2),
         ResolvedPolicy {
-            handled_fs: AccessFs::from_all(ABI::V4),
-            handled_net: AccessNet::from_all(ABI::V4),
             rules_path_beneath: [(PathBuf::from("a"), AccessFs::from_all(ABI::V4))].into(),
             rules_net_port: [(1, AccessNet::from_all(ABI::V4))].into(),
-            ..Default::default()
+            ..resolved_policy_with_abi_defaults(ABI::V4)
         }
     );
 }
@@ -77,30 +72,25 @@ fn test_compose_scope() {
         "abi": 6,
         "ruleset": [
             {
-                "scoped": [ "abstract_unix_socket" ]
+                "unscoped": [ "signal" ]
             }
         ]
     }"#;
     let json2 = r#"{
-        "abi": 6,
-        "ruleset": [
-            {
-                "scoped": [ "abi.all" ]
-            }
-        ]
+        "abi": 6
     }"#;
 
     assert_eq!(
         get_composition(json1, json2),
         ResolvedPolicy {
             scoped: Scope::AbstractUnixSocket.into(),
-            ..Default::default()
+            ..resolved_policy_with_abi_defaults(ABI::V6)
         }
     );
 }
 
 #[test]
-fn test_compose_exclusive() {
+fn test_compose_allowance_union() {
     let json1 = r#"{
         "abi": 6,
         "pathBeneath": [
@@ -126,11 +116,46 @@ fn test_compose_exclusive() {
 
     assert_eq!(
         get_composition(json1, json2),
-        // No remaining access rights.
         ResolvedPolicy {
-            ..Default::default()
+            rules_path_beneath: [
+                (PathBuf::from("a"), AccessFs::Execute | AccessFs::ReadFile,),
+                (PathBuf::from("b"), AccessFs::ReadFile.into()),
+            ]
+            .into(),
+            ..resolved_policy_with_abi_defaults(ABI::V6)
         }
     );
+}
+
+#[test]
+fn test_composition_can_be_empty() {
+    let json1 = r#"{
+        "abi": 6,
+        "ruleset": [
+            {
+                "unhandledAccessNet": [ "abi.all" ],
+                "unscoped": [ "abi.all" ]
+            }
+        ]
+    }"#;
+    let json2 = r#"{
+        "abi": 6,
+        "ruleset": [
+            {
+                "unhandledAccessFs": [ "abi.all" ],
+                "unscoped": [ "abi.all" ]
+            }
+        ]
+    }"#;
+
+    let resolved = get_composition(json1, json2);
+    assert_eq!(resolved, ResolvedPolicy::default());
+    assert!(matches!(
+        resolved.build_ruleset(),
+        Err(BuildRulesetError::Ruleset(RulesetError::CreateRuleset(
+            CreateRulesetError::MissingHandledAccess
+        )))
+    ));
 }
 
 #[test]
@@ -139,13 +164,7 @@ fn test_compose_complement1() {
         "abi": 6,
         "ruleset": [
             {
-                "handledAccessFs": [ "read_file" ]
-            }
-        ],
-        "pathBeneath": [
-            {
-                "allowedAccess": [ "execute" ],
-                "parent": [ "a" ]
+                "unhandledAccessFs": [ "execute" ]
             }
         ]
     }"#;
@@ -153,7 +172,7 @@ fn test_compose_complement1() {
         "abi": 6,
         "pathBeneath": [
             {
-                "allowedAccess": [ "read_file" ],
+                "allowedAccess": [ "execute", "read_file" ],
                 "parent": [ "a" ]
             },
             {
@@ -166,13 +185,13 @@ fn test_compose_complement1() {
     assert_eq!(
         get_composition(json1, json2),
         ResolvedPolicy {
-            handled_fs: AccessFs::ReadFile.into(),
+            handled_fs: AccessFs::from_all(ABI::V6) & !AccessFs::Execute,
             rules_path_beneath: [
                 (PathBuf::from("a"), AccessFs::ReadFile.into()),
                 (PathBuf::from("b"), AccessFs::ReadFile.into()),
             ]
             .into(),
-            ..Default::default()
+            ..resolved_policy_with_abi_defaults(ABI::V6)
         }
     );
 }
@@ -183,21 +202,7 @@ fn test_compose_complement2() {
         "abi": 6,
         "pathBeneath": [
             {
-                "allowedAccess": [ "execute" ],
-                "parent": [ "a" ]
-            }
-        ]
-    }"#;
-    let json2 = r#"{
-        "abi": 6,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "execute" ]
-            }
-        ],
-        "pathBeneath": [
-            {
-                "allowedAccess": [ "read_file" ],
+                "allowedAccess": [ "execute", "read_file" ],
                 "parent": [ "a" ]
             },
             {
@@ -206,13 +211,21 @@ fn test_compose_complement2() {
             }
         ]
     }"#;
+    let json2 = r#"{
+        "abi": 6,
+        "ruleset": [
+            {
+                "unhandledAccessFs": [ "read_file" ]
+            }
+        ]
+    }"#;
 
     assert_eq!(
         get_composition(json1, json2),
         ResolvedPolicy {
-            handled_fs: AccessFs::Execute.into(),
+            handled_fs: AccessFs::from_all(ABI::V6) & !AccessFs::ReadFile,
             rules_path_beneath: [(PathBuf::from("a"), AccessFs::Execute.into()),].into(),
-            ..Default::default()
+            ..resolved_policy_with_abi_defaults(ABI::V6)
         }
     );
 }
@@ -236,19 +249,10 @@ fn test_compose_standalone_variable() {
     }"#;
     let json2 = r#"{
         "abi": 6,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "execute" ]
-            }
-        ],
         "pathBeneath": [
             {
                 "allowedAccess": [ "read_file" ],
-                "parent": [ "a" ]
-            },
-            {
-                "allowedAccess": [ "read_file" ],
-                "parent": [ "b" ]
+                "parent": [ "a", "b" ]
             }
         ]
     }"#;
@@ -256,13 +260,12 @@ fn test_compose_standalone_variable() {
     assert_eq!(
         get_composition(json1, json2),
         ResolvedPolicy {
-            handled_fs: AccessFs::Execute.into(),
             rules_path_beneath: [
-                (PathBuf::from("a"), AccessFs::Execute.into()),
-                (PathBuf::from("b"), AccessFs::Execute.into()),
+                (PathBuf::from("a"), AccessFs::Execute | AccessFs::ReadFile),
+                (PathBuf::from("b"), AccessFs::Execute | AccessFs::ReadFile),
             ]
             .into(),
-            ..Default::default()
+            ..resolved_policy_with_abi_defaults(ABI::V6)
         }
     );
 }
@@ -271,11 +274,6 @@ fn test_compose_standalone_variable() {
 fn test_compose_shared_variable() {
     let json1 = r#"{
         "abi": 6,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "read_file" ]
-            }
-        ],
         "variable": [
             {
                 "name": "foo",
@@ -291,11 +289,6 @@ fn test_compose_shared_variable() {
     }"#;
     let json2 = r#"{
         "abi": 6,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "execute" ]
-            }
-        ],
         "variable": [
             {
                 "name": "foo"
@@ -316,7 +309,6 @@ fn test_compose_shared_variable() {
     assert_eq!(
         get_composition(json1, json2),
         ResolvedPolicy {
-            handled_fs: AccessFs::Execute | AccessFs::ReadFile,
             rules_path_beneath: [
                 (PathBuf::from("a"), AccessFs::Execute | AccessFs::ReadFile),
                 (PathBuf::from("b"), AccessFs::Execute | AccessFs::ReadFile),
@@ -324,7 +316,7 @@ fn test_compose_shared_variable() {
                 (PathBuf::from("x/b"), AccessFs::ReadFile.into()),
             ]
             .into(),
-            ..Default::default()
+            ..resolved_policy_with_abi_defaults(ABI::V6)
         }
     );
 }
@@ -333,11 +325,6 @@ fn test_compose_shared_variable() {
 fn test_compose_same_resolved_path() {
     let json1 = r#"{
         "abi": 6,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "read_file" ]
-            }
-        ],
         "variable": [
             {
                 "name": "foo",
@@ -353,11 +340,6 @@ fn test_compose_same_resolved_path() {
     }"#;
     let json2 = r#"{
         "abi": 6,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "execute" ]
-            }
-        ],
         "variable": [
             {
                 "name": "bar",
@@ -375,10 +357,9 @@ fn test_compose_same_resolved_path() {
     assert_eq!(
         get_composition(json1, json2),
         ResolvedPolicy {
-            handled_fs: AccessFs::Execute | AccessFs::ReadFile,
             rules_path_beneath: [(PathBuf::from("a"), AccessFs::Execute | AccessFs::ReadFile)]
                 .into(),
-            ..Default::default()
+            ..resolved_policy_with_abi_defaults(ABI::V6)
         }
     );
 }
@@ -387,15 +368,8 @@ fn test_compose_same_resolved_path() {
 // see TryFrom<Policy> for ResolvedPolicy).
 #[test]
 fn test_abi_compose_all() {
-    // ruleset.scoped is tested by test_compose_most_fs_net().
     let json1 = r#"{
         "abi": 1,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "abi.all" ],
-                "handledAccessNet": [ "abi.all" ]
-            }
-        ],
         "pathBeneath": [
             {
                 "allowedAccess": [ "abi.read_execute" ],
@@ -411,12 +385,6 @@ fn test_abi_compose_all() {
     }"#;
     let json2 = r#"{
         "abi": 2,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "abi.all" ],
-                "handledAccessNet": [ "abi.all" ]
-            }
-        ],
         "pathBeneath": [
             {
                 "allowedAccess": [ "abi.read_write" ],
@@ -434,10 +402,8 @@ fn test_abi_compose_all() {
     assert_eq!(
         get_composition(json1, json2),
         ResolvedPolicy {
-            handled_fs: AccessFs::from_all(ABI::V1),
-            // No handled_net nor rules_net_port because not supported by ABI v1.
             rules_path_beneath: [(PathBuf::from("."), AccessFs::from_all(ABI::V1))].into(),
-            ..Default::default()
+            ..resolved_policy_with_abi_defaults(ABI::V1)
         }
     );
 }
@@ -446,31 +412,18 @@ fn test_abi_compose_all() {
 fn test_abi_compose_read_write_v1() {
     let json1 = r#"{
         "abi": 1,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "abi.all" ],
-                "handledAccessNet": [ "abi.all" ]
-            }
-        ],
         "pathBeneath": [
             {
                 "allowedAccess": [ "abi.read_execute" ],
                 "parent": [ "." ]
             }
-        ],
-        "netPort": [
-            {
-                "allowedAccess": [ "abi.all" ],
-                "port": [ 1 ]
-            }
         ]
     }"#;
     let json2 = r#"{
-        "abi": 2,
+        "abi": 4,
         "ruleset": [
             {
-                "handledAccessFs": [ "abi.read_write" ],
-                "handledAccessNet": [ "bind_tcp" ]
+                "unhandledAccessFs": [ "execute" ]
             }
         ],
         "pathBeneath": [
@@ -490,17 +443,13 @@ fn test_abi_compose_read_write_v1() {
     assert_eq!(
         get_composition(json1, json2),
         ResolvedPolicy {
-            handled_fs: AccessFs::from_all(ABI::V1)
-                & AccessFs::from_all(ABI::V2)
-                & !AccessFs::Execute,
-            // No handled_net nor rules_net_port because not supported by ABI v1.
+            handled_fs: AccessFs::from_all(ABI::V1) & !AccessFs::Execute,
             rules_path_beneath: [(
                 PathBuf::from("."),
-                // Execution is not handled by json2.
                 AccessFs::from_all(ABI::V1) & !AccessFs::Execute
             )]
             .into(),
-            ..Default::default()
+            ..resolved_policy_with_abi_defaults(ABI::V1)
         }
     );
 }
@@ -509,12 +458,6 @@ fn test_abi_compose_read_write_v1() {
 fn test_abi_compose_read_write_v4() {
     let json1 = r#"{
         "abi": 4,
-        "ruleset": [
-            {
-                "handledAccessFs": [ "abi.all" ],
-                "handledAccessNet": [ "abi.all" ]
-            }
-        ],
         "pathBeneath": [
             {
                 "allowedAccess": [ "abi.read_execute" ],
@@ -532,8 +475,8 @@ fn test_abi_compose_read_write_v4() {
         "abi": 6,
         "ruleset": [
             {
-                "handledAccessFs": [ "abi.read_write" ],
-                "handledAccessNet": [ "bind_tcp" ]
+                "unhandledAccessFs": [ "execute" ],
+                "unhandledAccessNet": [ "connect_tcp" ]
             }
         ],
         "pathBeneath": [
@@ -553,20 +496,15 @@ fn test_abi_compose_read_write_v4() {
     assert_eq!(
         get_composition(json1, json2),
         ResolvedPolicy {
-            handled_fs: AccessFs::from_all(ABI::V4)
-                & AccessFs::from_all(ABI::V4)
-                & !AccessFs::Execute,
-            // Only bind_tcp is explicitly handled by json2, but a rule
-            // implicitly handles connect_tcp.
-            handled_net: AccessNet::from_all(ABI::V4),
+            handled_fs: AccessFs::from_all(ABI::V4) & !AccessFs::Execute,
+            handled_net: AccessNet::BindTcp.into(),
             rules_path_beneath: [(
                 PathBuf::from("."),
-                // Execution is not handled by json2.
                 AccessFs::from_all(ABI::V4) & !AccessFs::Execute
             )]
             .into(),
-            rules_net_port: [(1, AccessNet::from_all(ABI::V4))].into(),
-            ..Default::default()
+            rules_net_port: [(1, AccessNet::BindTcp.into())].into(),
+            ..resolved_policy_with_abi_defaults(ABI::V4)
         }
     );
 }
