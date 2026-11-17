@@ -35,3 +35,6 @@ mod tests_abi;
 
 #[cfg(test)]
 mod tests_inverse;
+
+#[cfg(test)]
+mod tests_runtime;

@@ -33,7 +33,7 @@ pub(crate) struct RulesetMasks {
 }
 
 impl RulesetMasks {
-    fn from_all(abi: ABI) -> Self {
+    pub(crate) fn from_all(abi: ABI) -> Self {
         Self {
             fs: AccessFs::from_all(abi),
             net: AccessNet::from_all(abi),
