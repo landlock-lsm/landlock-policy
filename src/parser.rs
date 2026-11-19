@@ -304,6 +304,22 @@ impl<'de> Deserialize<'de> for TemplateString {
     }
 }
 
+pub(crate) trait PolicyAccessItem {
+    type Access: Access;
+
+    fn resolve(&self, abi: ABI) -> BitFlags<Self::Access>;
+}
+
+impl<T> NonEmptySet<T>
+where
+    T: PolicyAccessItem,
+{
+    pub(crate) fn resolve_bitflags(&self, abi: ABI) -> BitFlags<T::Access> {
+        self.iter()
+            .fold(BitFlags::EMPTY, |flags, item| flags | item.resolve(abi))
+    }
+}
+
 #[derive(Debug, Deserialize, Ord, Eq, PartialOrd, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum JsonFsAccessItem {
@@ -329,6 +345,14 @@ pub(crate) enum JsonFsAccessItem {
     Refer,
     Truncate,
     IoctlDev,
+}
+
+impl PolicyAccessItem for JsonFsAccessItem {
+    type Access = AccessFs;
+
+    fn resolve(&self, abi: ABI) -> BitFlags<Self::Access> {
+        ValueAccessFs::resolve_bitflags(self, abi)
+    }
 }
 
 trait AbiGroup<A>
@@ -473,14 +497,6 @@ fn test_v2_read_write() {
     assert!(rw.contains(AccessFs::Refer));
 }
 
-impl NonEmptySet<JsonFsAccessItem> {
-    pub fn resolve_bitflags(&self, abi: ABI) -> BitFlags<AccessFs> {
-        self.iter().fold(BitFlags::EMPTY, |flags, item| {
-            flags | ValueAccessFs::resolve_bitflags(item, abi)
-        })
-    }
-}
-
 #[derive(Debug, Deserialize, Ord, Eq, PartialOrd, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum JsonNetAccessItem {
@@ -488,6 +504,14 @@ pub(crate) enum JsonNetAccessItem {
     AbiAll,
     BindTcp,
     ConnectTcp,
+}
+
+impl PolicyAccessItem for JsonNetAccessItem {
+    type Access = AccessNet;
+
+    fn resolve(&self, abi: ABI) -> BitFlags<Self::Access> {
+        ValueAccessNet::resolve_bitflags(self, abi)
+    }
 }
 
 enum AbiGroupNet {
@@ -514,14 +538,6 @@ impl From<&JsonNetAccessItem> for ValueAccessNet {
     }
 }
 
-impl NonEmptySet<JsonNetAccessItem> {
-    pub fn resolve_bitflags(&self, abi: ABI) -> BitFlags<AccessNet> {
-        self.iter().fold(BitFlags::EMPTY, |flags, item| {
-            flags | ValueAccessNet::resolve_bitflags(item, abi)
-        })
-    }
-}
-
 #[derive(Debug, Deserialize, Ord, Eq, PartialOrd, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum JsonScopeItem {
@@ -529,6 +545,14 @@ pub(crate) enum JsonScopeItem {
     AbiAll,
     AbstractUnixSocket,
     Signal,
+}
+
+impl PolicyAccessItem for JsonScopeItem {
+    type Access = Scope;
+
+    fn resolve(&self, abi: ABI) -> BitFlags<Self::Access> {
+        ValueScope::resolve_bitflags(self, abi)
+    }
 }
 
 enum AbiGroupScope {
@@ -552,14 +576,6 @@ impl From<&JsonScopeItem> for ValueScope {
             JsonScopeItem::AbstractUnixSocket => Scope::AbstractUnixSocket.into(),
             JsonScopeItem::Signal => Scope::Signal.into(),
         }
-    }
-}
-
-impl NonEmptySet<JsonScopeItem> {
-    pub fn resolve_bitflags(&self, abi: ABI) -> BitFlags<Scope> {
-        self.iter().fold(BitFlags::EMPTY, |flags, item| {
-            flags | ValueScope::resolve_bitflags(item, abi)
-        })
     }
 }
 
