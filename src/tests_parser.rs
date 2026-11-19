@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::parser::LATEST_ABI;
-use crate::policy::ResolvedPolicy;
+use crate::policy::{ResolvedPolicy, RulesetMasks};
 use crate::tests_helpers::{parse_json, parse_toml, validate_json};
 use crate::Policy;
 use landlock::{Access, AccessFs, AccessNet, Scope, ABI};
@@ -233,9 +233,11 @@ fn test_full_ruleset_1() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_fs: AccessFs::Execute.into(),
-            handled_net: AccessNet::BindTcp.into(),
-            scoped: Scope::AbstractUnixSocket.into(),
+            masks: RulesetMasks {
+                fs: AccessFs::Execute.into(),
+                net: AccessNet::BindTcp.into(),
+                scope: Scope::AbstractUnixSocket.into(),
+            },
             ..Policy::empty(ABI::V6)
         })
     );
@@ -256,9 +258,11 @@ fn test_full_ruleset_2() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_fs: AccessFs::Execute.into(),
-            handled_net: AccessNet::BindTcp.into(),
-            scoped: Scope::AbstractUnixSocket.into(),
+            masks: RulesetMasks {
+                fs: AccessFs::Execute.into(),
+                net: AccessNet::BindTcp.into(),
+                scope: Scope::AbstractUnixSocket.into(),
+            },
             ..Policy::empty(ABI::V6)
         })
     );
@@ -279,7 +283,10 @@ fn test_one_handled_access_fs() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_fs: AccessFs::Execute.into(),
+            masks: RulesetMasks {
+                fs: AccessFs::Execute.into(),
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -321,7 +328,10 @@ fn test_all_handled_access_fs_json() {
     assert_eq!(
         parse_json(&json),
         Ok(Policy {
-            handled_fs: AccessFs::from_all(LATEST_ABI),
+            masks: RulesetMasks {
+                fs: AccessFs::from_all(LATEST_ABI),
+                ..Default::default()
+            },
             ..Policy::empty(LATEST_ABI)
         })
     );
@@ -360,7 +370,10 @@ fn test_all_handled_access_fs_toml() {
     assert_eq!(
         parse_toml(&toml).unwrap(),
         Policy {
-            handled_fs: AccessFs::from_all(LATEST_ABI),
+            masks: RulesetMasks {
+                fs: AccessFs::from_all(LATEST_ABI),
+                ..Default::default()
+            },
             ..Policy::empty(LATEST_ABI)
         }
     );
@@ -393,7 +406,10 @@ fn test_dup_handled_access_fs_1() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_fs: AccessFs::Execute | AccessFs::WriteFile,
+            masks: RulesetMasks {
+                fs: AccessFs::Execute | AccessFs::WriteFile,
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -418,7 +434,10 @@ fn test_dup_handled_access_fs_2() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_fs: AccessFs::Execute | AccessFs::WriteFile,
+            masks: RulesetMasks {
+                fs: AccessFs::Execute | AccessFs::WriteFile,
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -646,7 +665,10 @@ fn test_one_handled_access_net() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_net: AccessNet::BindTcp.into(),
+            masks: RulesetMasks {
+                net: AccessNet::BindTcp.into(),
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -669,7 +691,10 @@ fn test_all_handled_access_net() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_net: AccessNet::from_all(ABI::V6),
+            masks: RulesetMasks {
+                net: AccessNet::from_all(ABI::V6),
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -688,7 +713,10 @@ fn test_dup_handled_access_net_1() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_net: AccessNet::BindTcp | AccessNet::ConnectTcp,
+            masks: RulesetMasks {
+                net: AccessNet::BindTcp | AccessNet::ConnectTcp,
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -713,7 +741,10 @@ fn test_dup_handled_access_net_2() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_net: AccessNet::BindTcp | AccessNet::ConnectTcp,
+            masks: RulesetMasks {
+                net: AccessNet::BindTcp | AccessNet::ConnectTcp,
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -764,7 +795,10 @@ fn test_one_net_port() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_net: AccessNet::BindTcp.into(),
+            masks: RulesetMasks {
+                net: AccessNet::BindTcp.into(),
+                ..Default::default()
+            },
             rules_net_port: [(443, AccessNet::BindTcp.into())].into(),
             ..Policy::empty(ABI::V6)
         }),
@@ -798,7 +832,10 @@ fn test_overlap_net_port() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_net: AccessNet::BindTcp | AccessNet::ConnectTcp,
+            masks: RulesetMasks {
+                net: AccessNet::BindTcp | AccessNet::ConnectTcp,
+                ..Default::default()
+            },
             rules_net_port: [(443, AccessNet::BindTcp | AccessNet::ConnectTcp)].into(),
             ..Policy::empty(ABI::V6)
         }),
@@ -821,8 +858,11 @@ fn test_mix_handled_access_1() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_fs: AccessFs::Execute.into(),
-            handled_net: AccessNet::BindTcp.into(),
+            masks: RulesetMasks {
+                fs: AccessFs::Execute.into(),
+                net: AccessNet::BindTcp.into(),
+                scope: Default::default(),
+            },
             ..Policy::empty(ABI::V6)
         })
     );
@@ -845,8 +885,11 @@ fn test_mix_handled_access_2() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_fs: AccessFs::Execute.into(),
-            handled_net: AccessNet::BindTcp | AccessNet::ConnectTcp,
+            masks: RulesetMasks {
+                fs: AccessFs::Execute.into(),
+                net: AccessNet::BindTcp | AccessNet::ConnectTcp,
+                scope: Default::default(),
+            },
             ..Policy::empty(ABI::V6)
         })
     );
@@ -867,7 +910,10 @@ fn test_one_scoped() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            scoped: Scope::AbstractUnixSocket.into(),
+            masks: RulesetMasks {
+                scope: Scope::AbstractUnixSocket.into(),
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -890,7 +936,10 @@ fn test_all_scoped() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            scoped: Scope::from_all(ABI::V6),
+            masks: RulesetMasks {
+                scope: Scope::from_all(ABI::V6),
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -909,7 +958,10 @@ fn test_dup_scoped_1() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            scoped: Scope::Signal | Scope::AbstractUnixSocket,
+            masks: RulesetMasks {
+                scope: Scope::Signal | Scope::AbstractUnixSocket,
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -934,7 +986,10 @@ fn test_dup_scoped_2() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            scoped: Scope::Signal | Scope::AbstractUnixSocket,
+            masks: RulesetMasks {
+                scope: Scope::Signal | Scope::AbstractUnixSocket,
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V6)
         }),
     );
@@ -987,8 +1042,11 @@ fn test_infer_mixed_handled_and_rule() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_fs: AccessFs::Execute.into(),
-            handled_net: AccessNet::BindTcp.into(),
+            masks: RulesetMasks {
+                fs: AccessFs::Execute.into(),
+                net: AccessNet::BindTcp.into(),
+                scope: Default::default(),
+            },
             rules_net_port: [(443, AccessNet::BindTcp.into())].into(),
             ..Policy::empty(ABI::V6)
         }),
@@ -1045,7 +1103,10 @@ fn test_infer_handled_access_net() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_net: AccessNet::BindTcp | AccessNet::ConnectTcp,
+            masks: RulesetMasks {
+                net: AccessNet::BindTcp | AccessNet::ConnectTcp,
+                ..Default::default()
+            },
             rules_net_port: [(443, AccessNet::ConnectTcp.into())].into(),
             ..Policy::empty(ABI::V6)
         })
@@ -1087,7 +1148,10 @@ fn test_net_port_alone() {
     assert_eq!(
         parse_json(json),
         Ok(Policy {
-            handled_net: AccessNet::BindTcp.into(),
+            masks: RulesetMasks {
+                net: AccessNet::BindTcp.into(),
+                ..Default::default()
+            },
             rules_net_port: [(443, AccessNet::BindTcp.into())].into(),
             ..Policy::empty(ABI::V6)
         })

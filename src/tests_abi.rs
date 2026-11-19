@@ -2,6 +2,7 @@
 
 use crate::{
     parser::{TemplateString, LATEST_ABI},
+    policy::RulesetMasks,
     tests_helpers::{parse_json, parse_json_schema, parse_toml},
     Policy,
 };
@@ -81,7 +82,10 @@ fn test_latest_plus_one() {
         "#
     );
     let config = Policy {
-        handled_fs: AccessFs::from_all(LATEST_ABI),
+        masks: RulesetMasks {
+            fs: AccessFs::from_all(LATEST_ABI),
+            ..Default::default()
+        },
         ..Policy::empty(LATEST_ABI)
     };
 
@@ -110,7 +114,10 @@ fn test_access_fs_with_value() {
     "#;
 
     let policy = Policy {
-        handled_fs: AccessFs::from_all(ABI::V2),
+        masks: RulesetMasks {
+            fs: AccessFs::from_all(ABI::V2),
+            ..Default::default()
+        },
         ..Policy::empty(ABI::V2)
     };
     assert_eq!(parse_json(json).unwrap(), policy);
@@ -191,7 +198,10 @@ fn test_format_ok() {
     "#;
 
     let policy = Policy {
-        handled_fs: AccessFs::Execute.into(),
+        masks: RulesetMasks {
+            fs: AccessFs::Execute.into(),
+            ..Default::default()
+        },
         ..Policy::empty(ABI::V1)
     };
     assert_eq!(parse_json(json).unwrap(), policy);
@@ -272,9 +282,11 @@ fn test_all_versions_abi_all() {
 
         let abi = version.into();
         let mut policy = Policy {
-            handled_fs: AccessFs::from_all(abi),
-            handled_net: AccessNet::from_all(abi),
-            scoped: Scope::from_all(abi),
+            masks: RulesetMasks {
+                fs: AccessFs::from_all(abi),
+                net: AccessNet::from_all(abi),
+                scope: Scope::from_all(abi),
+            },
             rules_path_beneath: [(TemplateString::from_text("."), AccessFs::from_all(abi))].into(),
             ..Policy::empty(abi)
         };
@@ -325,7 +337,10 @@ fn test_all_versions_abi_read_execute() {
             AccessFs::from_read(abi) | (AccessFs::from_all(abi) & AccessFs::Refer);
 
         let policy = Policy {
-            handled_fs: expected_access,
+            masks: RulesetMasks {
+                fs: expected_access,
+                ..Default::default()
+            },
             rules_path_beneath: [(TemplateString::from_text("."), expected_access)].into(),
             ..Policy::empty(abi)
         };
@@ -371,7 +386,10 @@ fn test_all_versions_abi_read_write() {
         let expected_access = AccessFs::from_all(abi) & !AccessFs::Execute;
 
         let policy = Policy {
-            handled_fs: expected_access,
+            masks: RulesetMasks {
+                fs: expected_access,
+                ..Default::default()
+            },
             rules_path_beneath: [(TemplateString::from_text("."), expected_access)].into(),
             ..Policy::empty(abi)
         };
@@ -444,7 +462,10 @@ fn test_i32() {
         ]
     "#;
     let policy = Policy {
-        handled_fs: AccessFs::from_all(LATEST_ABI),
+        masks: RulesetMasks {
+            fs: AccessFs::from_all(LATEST_ABI),
+            ..Default::default()
+        },
         ..Policy::empty(LATEST_ABI)
     };
     assert_eq!(parse_json(json).unwrap(), policy);
