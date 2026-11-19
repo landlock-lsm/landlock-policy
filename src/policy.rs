@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::nonempty::NonEmptyStruct;
-use crate::parser::{JsonPolicy, TemplateString, TomlPolicy};
+use crate::parser::{JsonPolicy, JsonRuleset, TemplateString, TomlPolicy};
 use crate::variable::{NameError, ResolveError, Variables, VecStringIterator};
 use landlock::{
     AccessFs, AccessNet, BitFlags, NetPort, PathBeneath, PathFd, PathFdError, Ruleset, RulesetAttr,
@@ -10,6 +10,7 @@ use landlock::{
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::num::TryFromIntError;
+use std::ops::{BitAnd, BitOr};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -24,14 +25,43 @@ pub enum BuildRulesetError {
     Ruleset(#[from] RulesetError),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RulesetMasks {
+    pub(crate) fs: BitFlags<AccessFs>,
+    pub(crate) net: BitFlags<AccessNet>,
+    pub(crate) scope: BitFlags<Scope>,
+}
+
+impl BitOr for RulesetMasks {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            fs: self.fs | rhs.fs,
+            net: self.net | rhs.net,
+            scope: self.scope | rhs.scope,
+        }
+    }
+}
+
+impl BitAnd for RulesetMasks {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self {
+            fs: self.fs & rhs.fs,
+            net: self.net & rhs.net,
+            scope: self.scope & rhs.scope,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
     /// Effective ABI used to interpret every listed access right.
     pub(crate) abi: ABI,
     pub(crate) variables: Variables,
-    pub(crate) handled_fs: BitFlags<AccessFs>,
-    pub(crate) handled_net: BitFlags<AccessNet>,
-    pub(crate) scoped: BitFlags<Scope>,
+    pub(crate) masks: RulesetMasks,
     pub(crate) rules_path_beneath: BTreeMap<TemplateString, BitFlags<AccessFs>>,
     pub(crate) rules_net_port: BTreeMap<u64, BitFlags<AccessNet>>,
 }
@@ -73,19 +103,23 @@ impl TryFrom<NonEmptyStruct<JsonPolicy>> for Policy {
         }
 
         for ruleset in json.ruleset.unwrap_or_default() {
-            let ruleset = ruleset.into_inner();
-            policy.handled_fs |= ruleset
-                .handledAccessFs
-                .map(|access| access.resolve_bitflags(policy.abi))
-                .unwrap_or_default();
-            policy.handled_net |= ruleset
-                .handledAccessNet
-                .map(|access| access.resolve_bitflags(policy.abi))
-                .unwrap_or_default();
-            policy.scoped |= ruleset
-                .scoped
-                .map(|scoped| scoped.resolve_bitflags(policy.abi))
-                .unwrap_or_default();
+            let JsonRuleset {
+                handledAccessFs,
+                handledAccessNet,
+                scoped,
+            } = ruleset.into_inner();
+            policy.masks = policy.masks
+                | RulesetMasks {
+                    fs: handledAccessFs
+                        .map(|access| access.resolve_bitflags(policy.abi))
+                        .unwrap_or_default(),
+                    net: handledAccessNet
+                        .map(|access| access.resolve_bitflags(policy.abi))
+                        .unwrap_or_default(),
+                    scope: scoped
+                        .map(|scoped| scoped.resolve_bitflags(policy.abi))
+                        .unwrap_or_default(),
+                };
         }
 
         for path_beneath in json.pathBeneath.unwrap_or_default() {
@@ -95,7 +129,7 @@ impl TryFrom<NonEmptyStruct<JsonPolicy>> for Policy {
             // access group resolution.
             if !access.is_empty() {
                 // Automatically augment and keep the ruleset consistent.
-                policy.handled_fs |= access;
+                policy.masks.fs |= access;
 
                 for parent in path_beneath.parent {
                     policy
@@ -114,7 +148,7 @@ impl TryFrom<NonEmptyStruct<JsonPolicy>> for Policy {
             // access group resolution.
             if !access.is_empty() {
                 // Automatically augment and keep the ruleset consistent.
-                policy.handled_net |= access;
+                policy.masks.net |= access;
 
                 for port in net_port.port {
                     policy
@@ -221,9 +255,7 @@ impl Policy {
         Self {
             abi,
             variables: Default::default(),
-            handled_fs: Default::default(),
-            handled_net: Default::default(),
-            scoped: Default::default(),
+            masks: Default::default(),
             rules_path_beneath: Default::default(),
             rules_net_port: Default::default(),
         }
@@ -253,8 +285,9 @@ impl Policy {
     /// policy, ensuring predictable behavior regardless of the sequence
     /// in which policies are combined.
     pub fn compose(&mut self, other: &Self) {
-        let common_handled_fs = self.handled_fs & other.handled_fs;
-        let common_handled_net = self.handled_net & other.handled_net;
+        let common_masks = self.masks & other.masks;
+        let common_handled_fs = common_masks.fs;
+        let common_handled_net = common_masks.net;
 
         // First step: downgrade the current access rights according to other's
         // handled access rights, and remove entries with empty accesses.
@@ -294,9 +327,7 @@ impl Policy {
         }
 
         // Fourth step: downgrade the handled access rights.
-        self.handled_fs &= other.handled_fs;
-        self.handled_net &= other.handled_net;
-        self.scoped &= other.scoped;
+        self.masks = common_masks;
 
         // Fifth step: downgrade the ABI version.
         self.abi = self.abi.min(other.abi);
@@ -405,9 +436,7 @@ impl Policy {
 fn test_policy_empty() {
     let policy = Policy::empty(ABI::V6);
     assert_eq!(policy.abi, ABI::V6);
-    assert_eq!(policy.handled_fs, BitFlags::EMPTY);
-    assert_eq!(policy.handled_net, BitFlags::EMPTY);
-    assert_eq!(policy.scoped, BitFlags::EMPTY);
+    assert_eq!(policy.masks, RulesetMasks::default());
 }
 
 pub trait OptionalPolicy {
@@ -469,9 +498,17 @@ impl TryFrom<Policy> for ResolvedPolicy {
 
     /// Resolve all (composed) variables but not local (synthetic) variables such as `abi.*`.
     fn try_from(policy: Policy) -> Result<Self, Self::Error> {
+        let Policy {
+            abi: _,
+            variables,
+            masks,
+            rules_path_beneath: policy_rules_path_beneath,
+            rules_net_port,
+        } = policy;
+        let RulesetMasks { fs, net, scope } = masks;
         let mut rules_path_beneath: BTreeMap<PathBuf, BitFlags<AccessFs>> = Default::default();
-        for (path_beneath, access) in policy.rules_path_beneath {
-            let set = policy.variables.resolve(&path_beneath)?;
+        for (path_beneath, access) in policy_rules_path_beneath {
+            let set = variables.resolve(&path_beneath)?;
             for path in VecStringIterator::new(&set) {
                 rules_path_beneath
                     .entry(PathBuf::from(path))
@@ -481,11 +518,11 @@ impl TryFrom<Policy> for ResolvedPolicy {
         }
 
         Ok(Self {
-            handled_fs: policy.handled_fs,
-            handled_net: policy.handled_net,
-            scoped: policy.scoped,
+            handled_fs: fs,
+            handled_net: net,
+            scoped: scope,
             rules_path_beneath,
-            rules_net_port: policy.rules_net_port,
+            rules_net_port,
         })
     }
 }
@@ -498,7 +535,10 @@ mod tests_compose {
     #[test]
     fn test_empty_ruleset() {
         let mut c1 = Policy {
-            handled_fs: AccessFs::Execute.into(),
+            masks: RulesetMasks {
+                fs: AccessFs::Execute.into(),
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V1)
         };
         let c2 = c1.clone();
@@ -509,11 +549,17 @@ mod tests_compose {
     #[test]
     fn test_different_ruleset() {
         let mut c1 = Policy {
-            handled_fs: AccessFs::Execute.into(),
+            masks: RulesetMasks {
+                fs: AccessFs::Execute.into(),
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V4)
         };
         let c2 = Policy {
-            handled_net: AccessNet::BindTcp.into(),
+            masks: RulesetMasks {
+                net: AccessNet::BindTcp.into(),
+                ..Default::default()
+            },
             ..Policy::empty(ABI::V4)
         };
         let expect = Policy::empty(ABI::V4);
@@ -525,7 +571,10 @@ mod tests_compose {
     fn test_compose_v1_v2_without_one_right() {
         let c1_access = AccessFs::from_all(ABI::V1);
         let mut c1 = Policy {
-            handled_fs: c1_access,
+            masks: RulesetMasks {
+                fs: c1_access,
+                ..Default::default()
+            },
             rules_path_beneath: [
                 (TemplateString::from_text("/common"), c1_access),
                 (TemplateString::from_text("/c1"), c1_access),
@@ -537,7 +586,10 @@ mod tests_compose {
         assert!(c1_access.contains(AccessFs::WriteFile));
         let c2_access = AccessFs::from_all(ABI::V2) & !AccessFs::WriteFile;
         let c2 = Policy {
-            handled_fs: c2_access,
+            masks: RulesetMasks {
+                fs: c2_access,
+                ..Default::default()
+            },
             rules_path_beneath: [
                 (TemplateString::from_text("/common"), c2_access),
                 (TemplateString::from_text("/c2"), c2_access),
@@ -550,7 +602,10 @@ mod tests_compose {
         assert_eq!(
             c1,
             Policy {
-                handled_fs: c1_access & c2_access,
+                masks: RulesetMasks {
+                    fs: c1_access & c2_access,
+                    ..Default::default()
+                },
                 rules_path_beneath: [
                     (TemplateString::from_text("/common"), c1_access & c2_access),
                     (TemplateString::from_text("/c1"), c1_access & c2_access),

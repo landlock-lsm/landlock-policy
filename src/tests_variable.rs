@@ -2,7 +2,7 @@
 
 use crate::{
     parser::{TemplateString, TemplateToken},
-    policy::ResolvedPolicy,
+    policy::{ResolvedPolicy, RulesetMasks},
     tests_helpers::{parse_json, parse_json_schema, parse_toml},
     variable::{Name, ResolveError, Variables},
     Policy,
@@ -361,7 +361,10 @@ fn test_one_variable_json_toml_template() {
 
     let policy = Policy {
         variables: Variables::try_from([("foo", vec!["a", "b"])]).unwrap(),
-        handled_fs: AccessFs::Execute.into(),
+        masks: RulesetMasks {
+            fs: AccessFs::Execute.into(),
+            ..Default::default()
+        },
         rules_path_beneath: [(
             TemplateString(vec![TemplateToken::Var(Name::from_str("foo").unwrap())]),
             AccessFs::Execute.into(),
@@ -423,7 +426,10 @@ fn test_two_variable_template() {
         Policy {
             variables: Variables::try_from([("foo", vec!["a", "b"]), ("bar", vec!["X", "Y", "Z"])])
                 .unwrap(),
-            handled_fs: AccessFs::Execute.into(),
+            masks: RulesetMasks {
+                fs: AccessFs::Execute.into(),
+                ..Default::default()
+            },
             rules_path_beneath: [(
                 TemplateString(vec![
                     TemplateToken::Text("before/".into()),
