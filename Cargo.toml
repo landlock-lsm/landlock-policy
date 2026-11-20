@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 description = "Landlock policy specification and reference implementation"
 
 [workspace.dependencies]
-landlock = "0.4.3"
+landlock = "0.4.5"
 
 [package]
 name = "landlock-policy"

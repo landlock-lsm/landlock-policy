@@ -10,7 +10,7 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::str::FromStr;
 
 // Latest Landlock ABI recognized by this policy format.
-pub(crate) const LATEST_ABI: ABI = ABI::V6;
+pub(crate) const LATEST_ABI: ABI = ABI::V7;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TemplateToken {

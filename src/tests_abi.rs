@@ -38,6 +38,7 @@ fn test_represented_masks_by_abi() {
         (ABI::V4, fs_v3, net_v4, no_scope),
         (ABI::V5, fs_v5, net_v4, no_scope),
         (ABI::V6, fs_v5, net_v4, scope_v6),
+        (ABI::V7, fs_v5, net_v4, scope_v6),
     ] {
         assert_eq!(AccessFs::from_all(abi), fs);
         assert_eq!(AccessNet::from_all(abi), net);
@@ -47,7 +48,7 @@ fn test_represented_masks_by_abi() {
 
 #[test]
 fn test_latest_policy_abi() {
-    assert_eq!(LATEST_ABI, ABI::V6);
+    assert_eq!(LATEST_ABI, ABI::V7);
     // A newer ABI may leave these represented category masks unchanged. When
     // increasing LATEST_ABI, keep the baseline at the most recent ABI that
     // changed one of them.
