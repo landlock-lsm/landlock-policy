@@ -121,9 +121,12 @@ the running kernel; runtime compatibility is applied separately after the
 policy is interpreted.
 
 If a requested ABI is newer than the policy format supports, the parser uses
-the format's latest supported ABI to interpret the policy. This preserves the
-known subset of a future policy, but it does not make unknown access names,
-properties, or rule types valid; unknown syntax remains an error.
+the format's latest supported ABI to interpret the policy. This implementation
+recognizes through ABI v7. ABI v7 adds restrict-self flags outside the policy
+grammar, so its represented access-right and scope masks remain unchanged from
+ABI v6. This preserves the known subset of a future policy, but it does not make
+unknown access names, properties, or rule types valid; unknown syntax remains an
+error.
 
 **TODO:**
 In the case of an older user space and a newer kernel, it should be possible for
