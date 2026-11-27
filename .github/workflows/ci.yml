@@ -13,6 +13,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTDOCFLAGS: -D warnings
   RUSTFLAGS: -D warnings
+  LANDLOCK_TEST_TOOLS_COMMIT: 290ac97111b522e73a73b72fa92af232e34020d7
 
 # Ubuntu versions: https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners#supported-runners-and-hardware-resources
 
@@ -46,6 +47,134 @@ jobs:
 
     outputs:
       commits: ${{ toJSON(steps.*.outputs.*) }}
+
+  kernel_list:
+    runs-on: ubuntu-24.04
+    outputs:
+      kernels: ${{ toJSON(steps.id.outputs.*) }}
+    steps:
+
+    - name: Identify latest Linux versions
+      id: id
+      run: |
+        echo "List of tested kernels:" > $GITHUB_STEP_SUMMARY
+        abi=0
+        for version in 5.10 5.15 6.1 6.4 6.7 6.10 6.12 6.15 7.0; do
+          commit="$(git ls-remote https://github.com/landlock-lsm/linux refs/heads/linux-${version}.y | awk 'NR == 1 { print $1 }')"
+          if [[ -z "${commit}" ]]; then
+            echo "ERROR: Failed to fetch Linux ${version}" >&2
+            exit 1
+          fi
+          echo "kernel_${abi}={ \"version\":\"${version}\",  \"abi\":\"${abi}\",  \"commit\":\"${commit}\" }" >> $GITHUB_OUTPUT
+          echo "- Linux ${version}.y with Landlock ABI ${abi}: https://github.com/landlock-lsm/linux/commit/${commit}" >> $GITHUB_STEP_SUMMARY
+          let abi++ || :
+        done
+
+  get_kernels:
+    runs-on: ubuntu-24.04
+    needs: kernel_list
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: ${{ fromJSON(needs.kernel_list.outputs.kernels) }}
+    steps:
+
+    - name: Cache Linux ${{ fromJSON(matrix.kernel).version }}.y
+      id: cache_linux
+      uses: actions/cache@v6
+      with:
+        path: linux-${{ fromJSON(matrix.kernel).version }}
+        key: linux-${{ fromJSON(matrix.kernel).commit }}-${{ env.LANDLOCK_TEST_TOOLS_COMMIT }}
+
+    - name: Clone Landlock test tools
+      if: steps.cache_linux.outputs.cache-hit != 'true'
+      uses: actions/checkout@v7
+      with:
+        repository: landlock-lsm/landlock-test-tools
+        ref: ${{ env.LANDLOCK_TEST_TOOLS_COMMIT }}
+        path: landlock-test-tools
+
+    - name: Clone Linux ${{ fromJSON(matrix.kernel).version }}.y
+      if: steps.cache_linux.outputs.cache-hit != 'true'
+      uses: actions/checkout@v7
+      with:
+        repository: landlock-lsm/linux
+        ref: ${{ fromJSON(matrix.kernel).commit }}
+        path: linux
+
+    - name: Build Linux ${{ fromJSON(matrix.kernel).version }}.y
+      if: steps.cache_linux.outputs.cache-hit != 'true'
+      working-directory: linux
+      run: |
+        O=. BUILD_FLAVOR=light ../landlock-test-tools/check-linux.sh build
+        mv linux ../linux-${{ fromJSON(matrix.kernel).version }}
+
+  ubuntu_24_rust_kernel_abi:
+    runs-on: ubuntu-24.04
+    needs: [commit_list, kernel_list, get_kernels]
+    strategy:
+      fail-fast: false
+      matrix:
+        commit: ${{ fromJSON(needs.commit_list.outputs.commits) }}
+        kernel: ${{ fromJSON(needs.kernel_list.outputs.kernels) }}
+    # test-rust.sh runs this command and exports LANDLOCK_CRATE_TEST_ABI
+    # from the kernel ABI argument passed by the final step.
+    env:
+      CARGO: rustup run stable cargo --locked
+    steps:
+
+    - name: Install Rust stable
+      run: |
+        rm ~/.cargo/bin/{cargo-fmt,rustfmt} || :
+        rustup self update
+        rustup default stable
+        rustup update
+
+    - name: Clone Landlock test tools
+      uses: actions/checkout@v7
+      with:
+        repository: landlock-lsm/landlock-test-tools
+        ref: ${{ env.LANDLOCK_TEST_TOOLS_COMMIT }}
+        path: landlock-test-tools
+
+    - name: Clone Landlock Policy
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ matrix.commit }}
+        path: landlock-policy
+
+    - name: Cache Cargo registry
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry
+        key: cargo-registry-kernel-abi-${{ hashFiles('landlock-policy/Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-kernel-abi-
+          cargo-registry-
+
+    - name: Cache kernel ABI build
+      uses: actions/cache@v6
+      with:
+        path: |
+          landlock-policy/target
+        key: rust-kernel-abi-${{ hashFiles('landlock-policy/Cargo.lock') }}
+        restore-keys: |
+          rust-kernel-abi-
+
+    - name: Get Linux ${{ fromJSON(matrix.kernel).version }}.y
+      uses: actions/cache/restore@v6
+      with:
+        path: linux-${{ fromJSON(matrix.kernel).version }}
+        key: linux-${{ fromJSON(matrix.kernel).commit }}-${{ env.LANDLOCK_TEST_TOOLS_COMMIT }}
+        fail-on-cache-miss: true
+
+    - name: Run tests against Linux ${{ fromJSON(matrix.kernel).version }}.y
+      working-directory: landlock-policy
+      run: |
+        pwd
+        ls -lah ../linux-5.10
+        ../landlock-test-tools/test-rust.sh ../linux-${{ fromJSON(matrix.kernel).version }} ${{ fromJSON(matrix.kernel).abi }}
 
   ubuntu_24_json:
     runs-on: ubuntu-24.04
